@@ -79,25 +79,35 @@ if [[ -n ${bash_preexec_imported:-}${__bp_imported:-} ]]; then
     preexec_functions+=(__whoopz_start)
     precmd_functions=(__whoopz_end "${precmd_functions[@]}")
 else
-    # Bash runs the DEBUG trap before every simple command. Only the first one after a
-    # prompt starts a new command line; __whoopz_ready marks that moment.
+    # Bash runs the DEBUG trap before every simple command. A new command line starts when
+    # the prompt has come back (__whoopz_ready), or when bash moves on to the next line of a
+    # paste: pasted lines run back to back with no prompt in between, but each one gets its
+    # own history number ($HISTCMD). `a; b` typed on one line keeps one number.
     __whoopz_ready=
+    __whoopz_in_prompt=
+    __whoopz_line=
     __whoopz_debug() {
-        [[ -n ${COMP_LINE:-} || -z $__whoopz_ready ]] && return
+        [[ -n ${COMP_LINE:-} || -n $__whoopz_in_prompt ]] && return
+        # The history number also moves while the prompt is drawn; that's not a command.
+        [[ $BASH_COMMAND == __whoopz_prompt_* ]] && return
+        [[ -z $__whoopz_ready && $HISTCMD == "$__whoopz_line" ]] && return
         __whoopz_ready=
+        __whoopz_line=$HISTCMD
         local line
         line=$(HISTTIMEFORMAT= builtin history 1)
         [[ $line =~ ^\ *[0-9]+\*?\ +(.*)$ ]] && line=${BASH_REMATCH[1]}
         __whoopz_start "${line:-$BASH_COMMAND}"
     }
+    __whoopz_prompt_start() { __whoopz_in_prompt=1; __whoopz_end; }
+    __whoopz_prompt_done() { __whoopz_in_prompt=; __whoopz_ready=1; }
     if [[ -n $(trap -p DEBUG) ]]; then
         echo "whoops: replacing your DEBUG trap" >&2
     fi
     trap '__whoopz_debug' DEBUG
     if (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
-        PROMPT_COMMAND=(__whoopz_end "${PROMPT_COMMAND[@]}" '__whoopz_ready=1')
+        PROMPT_COMMAND=(__whoopz_prompt_start "${PROMPT_COMMAND[@]}" __whoopz_prompt_done)
     else
-        PROMPT_COMMAND="__whoopz_end; ${PROMPT_COMMAND:+${PROMPT_COMMAND%;}; }__whoopz_ready=1"
+        PROMPT_COMMAND="__whoopz_prompt_start; ${PROMPT_COMMAND:+${PROMPT_COMMAND%;}; }__whoopz_prompt_done"
     fi
 fi
 "#;

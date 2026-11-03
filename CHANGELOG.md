@@ -16,3 +16,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `whoops list` shows what each command changed, and `whoops <n>` undoes a specific one.
 - Undo never overwrites anything: if something new is in the way, that step is skipped and
   reported.
+
+### Fixed
+
+- Pasting several lines into bash made them one command, so one `whoops` undid all of them.
+  Each pasted line is now its own command.

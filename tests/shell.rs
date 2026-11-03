@@ -399,6 +399,7 @@ impl Terminal {
         let child = s
             .command(shell)
             .arg("shell")
+            .env("TERM", "xterm-256color")
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
             .stderr(Stdio::from(slave))
@@ -450,6 +451,28 @@ impl Terminal {
         std::thread::sleep(Duration::from_millis(200));
     }
 
+    /// Paste several lines at once, the way a terminal does it (bracketed paste). Bash then
+    /// runs them back to back without showing a prompt in between.
+    fn paste(&mut self, lines: &[&str], n: u32) {
+        let marker = (900_000 + n).to_string();
+        let text = lines.join("\n");
+        write!(
+            self.input,
+            "\x1b[200~{text}\necho $((900000 + {n}))\x1b[201~\n"
+        )
+        .unwrap();
+        let start = Instant::now();
+        while !self.output.lock().unwrap().contains(&marker) {
+            assert!(
+                start.elapsed() < Duration::from_secs(15),
+                "timed out waiting for the paste. Output so far:\n{}",
+                self.output.lock().unwrap()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
     fn finish(mut self) -> String {
         writeln!(self.input, "exit").unwrap();
         let _ = self.child.wait();
@@ -477,6 +500,36 @@ fn interactive_undo_is_per_command_line(shell: &str) {
 #[test]
 fn interactive_bash_undo_is_per_command_line() {
     interactive_undo_is_per_command_line("/bin/bash");
+}
+
+#[test]
+fn interactive_bash_pasted_lines_are_separate_commands() {
+    let s = Sandbox::new();
+    s.write("a", "a");
+    s.write("b", "b");
+
+    let mut term = Terminal::start(&s, "/bin/bash");
+    term.run("bind 'set enable-bracketed-paste on'", 2);
+    term.paste(&["rm a", "rm b"], 3);
+    term.run("whoops", 4); // undoes `rm b` only
+    let only_b = s.exists("b") && !s.exists("a");
+    term.run("whoops", 5);
+    let out = term.finish();
+    assert!(only_b, "the first undo should bring back only b:\n{out}");
+    assert!(s.exists("a"), "the second undo should bring back a:\n{out}");
+}
+
+#[test]
+fn interactive_bash_one_line_with_semicolons_is_one_command() {
+    let s = Sandbox::new();
+    s.write("a", "a");
+    s.write("b", "b");
+
+    let mut term = Terminal::start(&s, "/bin/bash");
+    term.run("rm a; rm b", 2);
+    term.run("whoops", 3);
+    let out = term.finish();
+    assert!(s.exists("a") && s.exists("b"), "{out}");
 }
 
 #[test]
