@@ -155,3 +155,33 @@ pub fn cmdline(pid: u32) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+
+/// Now, in the same unit as [`ProcInfo::start_time`]: clock ticks since boot.
+pub fn now_ticks() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: plain calls; `ts` is written by the kernel.
+    let (hz, _) = unsafe {
+        (
+            libc::sysconf(libc::_SC_CLK_TCK).max(1) as u64,
+            libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut ts),
+        )
+    };
+    ts.tv_sec as u64 * hz + ts.tv_nsec as u64 * hz / 1_000_000_000
+}
+
+/// The ancestor of `pid` that the shell started directly (`pid` itself if the shell is its
+/// parent). Used to name a stray process after the program the shell launched.
+pub fn child_of_shell(pid: u32, shell: u32) -> u32 {
+    let mut current = pid;
+    for _ in 0..64 {
+        match info(current) {
+            Ok(i) if i.ppid as u32 == shell || i.ppid <= 1 => return current,
+            Ok(i) => current = i.ppid as u32,
+            Err(_) => return current,
+        }
+    }
+    current
+}

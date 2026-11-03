@@ -15,8 +15,10 @@
 //! Every paused call is assigned to an **entry** before anything is saved:
 //! - the command line running now, if the call comes from the shell itself or from the
 //!   terminal's **foreground** process group (the command you're waiting on), or
-//! - its own `[background]` entry, if it comes from a background job (`make &`, a file
-//!   watcher, fish generating completions on its first start). Those are still saved and can
+//!   A process in those groups that was born *before* the command line started can't be part
+//!   of it (fish generates completions on its first start, in its own group, for minutes).
+//! - its own `[background]` entry otherwise: background jobs (`make &`, a file watcher), and
+//!   the older processes above. Those are still saved and can
 //!   be undone with `whoops <n>`, but never get mixed into your commands, and plain `whoops`
 //!   leaves them alone.
 //!
@@ -78,9 +80,13 @@ pub struct Session {
     entries: HashMap<u64, Entry>,
     /// The command line running now; `None` at the prompt.
     current: Option<u64>,
-    /// Background process groups, the entry each one's changes go to, and the start time of
-    /// the group's leader (a process group id is reused once the group is gone).
-    background: HashMap<i32, (u64, Option<u64>)>,
+    /// When the current command line could have started its first process: the previous
+    /// "start" or "end" (clock ticks since boot). Processes born before can't belong to it.
+    window_start: u64,
+    last_boundary: u64,
+    /// Background jobs, the entry each one's changes go to, and the start time of the process
+    /// they're keyed by (ids are reused once a process is gone).
+    background: HashMap<BackgroundKey, (u64, Option<u64>)>,
     /// The entry the call being handled belongs to.
     target: Option<u64>,
     /// The shell process, and path prefixes it keeps its own files under.
@@ -132,6 +138,8 @@ impl Session {
             next_stash: 1,
             entries: HashMap::new(),
             current: None,
+            window_start: 0,
+            last_boundary: procfs::now_ticks(),
             background: HashMap::new(),
             target: None,
             shell_pid: None,
@@ -166,6 +174,10 @@ impl Session {
         self.end_command();
         let id = self.new_entry(Entry::new(text, false));
         self.current = Some(id);
+        // The window opens at the previous boundary, not now: this "start" may be read a
+        // moment after the command's first process was already born.
+        self.window_start = self.last_boundary;
+        self.last_boundary = procfs::now_ticks();
     }
 
     pub fn end_command(&mut self) {
@@ -173,6 +185,7 @@ impl Session {
         // goes to its own entry.
         if let Some(id) = self.current.take() {
             self.entries.remove(&id);
+            self.last_boundary = procfs::now_ticks();
         }
     }
 
@@ -207,29 +220,33 @@ impl Session {
         let (Ok(proc_info), Ok(shell_info)) = (procfs::info(pid), procfs::info(shell)) else {
             return self.current;
         };
-        // The shell's own group (prompt tools, fish functions, shells without job control),
-        // and the foreground group (the command you're waiting on): the current command.
-        if proc_info.pgid == shell_info.pgid || proc_info.pgid == proc_info.tpgid {
+        // A background job: its own group, not the one the terminal is waiting on.
+        if proc_info.pgid != shell_info.pgid && proc_info.pgid != proc_info.tpgid {
+            let key = BackgroundKey::Group(proc_info.pgid);
+            return Some(self.background_entry(key, proc_info.pgid as u32));
+        }
+        // The shell's own group (prompt tools, fish functions, shells without job control) or
+        // the foreground group (the command you're waiting on).
+        self.current?;
+        if proc_info.start_time >= self.window_start {
             return self.current;
         }
-        Some(self.background_entry(proc_info.pgid, pid))
+        // Born before this command line started, so not part of it.
+        let launched = procfs::child_of_shell(pid, shell);
+        Some(self.background_entry(BackgroundKey::Process(launched), launched))
     }
 
-    /// The entry for a background process group, made the first time the group changes
-    /// something.
-    fn background_entry(&mut self, pgid: i32, pid: u32) -> u64 {
-        let leader_start = procfs::info(pgid as u32).ok().map(|i| i.start_time);
-        if let Some(&(id, start)) = self.background.get(&pgid)
-            && (leader_start.is_none() || leader_start == start)
+    /// The entry for a background job, made the first time it changes something. `named_by`
+    /// is the process whose command line names the entry.
+    fn background_entry(&mut self, key: BackgroundKey, named_by: u32) -> u64 {
+        let started = procfs::info(named_by).ok().map(|i| i.start_time);
+        if let Some(&(id, start)) = self.background.get(&key)
+            && (started.is_none() || started == start)
         {
             return id;
         }
-        let mut text = procfs::cmdline(pgid as u32);
-        if text.is_empty() {
-            text = procfs::cmdline(pid);
-        }
-        let id = self.new_entry(Entry::new(text, true));
-        self.background.insert(pgid, (id, leader_start));
+        let id = self.new_entry(Entry::new(procfs::cmdline(named_by), true));
+        self.background.insert(key, (id, started));
         id
     }
 
@@ -330,6 +347,15 @@ impl Session {
     pub fn discard_stash(&self, name: &str) {
         let _ = fs::remove_file(self.stash_path(name));
     }
+}
+
+/// What a background entry is keyed by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BackgroundKey {
+    /// A background job in its own process group.
+    Group(i32),
+    /// An older process in the shell's own group, by the process the shell launched.
+    Process(u32),
 }
 
 /// Is `pid` the process `shell` or one of its threads? A thread shows up as

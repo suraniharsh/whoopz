@@ -627,6 +627,28 @@ fn background_jobs_get_their_own_entry(shell: &str) {
     assert!(out.contains("[background]"), "{out}");
 }
 
+/// What fish does on its first start: a process in the shell's own group (no job of its own),
+/// started before a command, writing files while that command runs. It isn't part of it.
+#[test]
+fn older_processes_in_the_shells_group_are_not_part_of_a_command() {
+    let s = Sandbox::new();
+    s.write("a", "a");
+
+    let mut term = Terminal::start(&s, "/bin/bash");
+    // With job control off (`set +m`), a `&` job stays in the shell's own group.
+    term.run("set +m; sh -c 'sleep 1; echo old > oldfile' & set -m", 2);
+    term.run("rm a", 3);
+    term.run("sleep 2", 4); // the old process writes its file during this command
+    term.run("whoops", 5);
+    term.run("whoops list", 6);
+    let out = term.finish();
+    assert!(s.exists("a"), "`rm a` should be undone:\n{out}");
+    assert!(
+        s.exists("oldfile"),
+        "the older process's file must stay:\n{out}"
+    );
+}
+
 #[test]
 fn bash_background_jobs_get_their_own_entry() {
     background_jobs_get_their_own_entry("/bin/bash");
