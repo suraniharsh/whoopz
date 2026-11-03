@@ -65,11 +65,16 @@ impl Debug {
     pub fn from_env(value: Option<std::ffi::OsString>) -> Debug {
         match value {
             Some(v) if v == "1" => Debug::Stderr,
-            Some(v) if v.as_encoded_bytes().starts_with(b"/") => std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&v)
-                .map_or(Debug::Stderr, Debug::File),
+            // Only you can read it: it lists paths of your files.
+            Some(v) if v.as_encoded_bytes().starts_with(b"/") => {
+                use std::os::unix::fs::OpenOptionsExt;
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .mode(0o600)
+                    .open(&v)
+                    .map_or(Debug::Stderr, Debug::File)
+            }
             _ => Debug::Off,
         }
     }
@@ -124,6 +129,11 @@ fn decide(watcher: &dyn Watcher, call: &PausedCall, s: &mut Session) -> Option<R
     let Some(file_call) = calls::decode(&call.name, &call.args) else {
         return Some(Reply::Continue);
     };
+    // A program in a sandbox or container sees a different filesystem, where a path can name
+    // a different file. Saving the wrong file, or later "restoring" one, would do harm.
+    if !crate::procfs::sees_same_files(call.pid) {
+        return Some(Reply::Continue);
+    }
 
     let prepared = match handle::prepare(call.pid, file_call) {
         Ok(prepared) => prepared,

@@ -135,6 +135,8 @@ Set `WHOOPZ_DEBUG=1` before `whoops shell` to see every call Whoopz pauses.
   drives, and a copy that big is skipped, with a warning)
 - Commands from an earlier `whoops shell` session: undo works within the session it happened in
 - A shell started inside the watched shell (`bash`, `zsh`): everything in it counts as one command
+- Edits written into the middle of a file without emptying it first (some editors, `dd conv=notrunc`)
+- Programs in a sandbox or container (flatpak, bubblewrap, podman): they see a different filesystem
 
 Whoopz is a **safety net, not a sandbox**. It is not a security boundary. See
 [SECURITY.md](SECURITY.md).
@@ -142,8 +144,9 @@ Whoopz is a **safety net, not a sandbox**. It is not a security boundary. See
 ## Where things are kept
 
 Each session has a folder in `~/.local/share/whoopz/sessions/` with its journal and the saved
-files. A deleted file is kept with a hard link, so keeping it needs no copy; its disk space
-is only freed when the session is cleaned up. Sessions are removed a week after they end.
+files. A deleted file is kept with a hard link, so keeping it needs no copy. That also means
+**deleting a file doesn't free its disk space until the session is cleaned up**, a week after it
+ends. To free space at once, delete the session's folder.
 
 ## Community
 

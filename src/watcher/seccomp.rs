@@ -90,9 +90,6 @@ impl Watcher for SeccompWatcher {
         let (val, error, flags) = match reply {
             // Let the kernel run the real call.
             Reply::Continue => (0, 0, libc::SECCOMP_USER_NOTIF_FLAG_CONTINUE as u32),
-            Reply::Return(value) => (value, 0, 0),
-            // Errors go back as negative numbers, like a raw system call returns them.
-            Reply::Fail(errno) => (0, -errno, 0),
         };
         let mut resp = libc::seccomp_notif_resp {
             id: call.id,

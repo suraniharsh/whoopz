@@ -361,6 +361,63 @@ fn files_on_another_drive_are_copied() {
     let _ = fs::remove_dir_all(&data);
 }
 
+/// A program in a sandbox sees a different filesystem: inside it, a path can name another
+/// file. Whoopz must never act on the file *it* sees under that path. (A version that did the
+/// delete itself deleted the host's file here.)
+#[test]
+fn a_sandboxed_program_never_makes_whoopz_touch_the_wrong_file() {
+    let sandboxes = Command::new("unshare")
+        .args(["-rm", "true"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !sandboxes {
+        eprintln!("unprivileged sandboxes aren't allowed here; skipping");
+        return;
+    }
+    let s = Sandbox::new();
+    s.write("host/f", "the host's file");
+    s.write("inner/f", "the file the sandbox sees");
+    let (host, inner) = (s.path("host"), s.path("inner"));
+
+    // Inside the sandbox, `inner` is mounted over `host`: deleting host/f there deletes inner/f.
+    s.run(&format!(
+        "cmd sandboxed; unshare -rm sh -c 'mount --bind \"$1\" \"$2\" && rm \"$2/f\"' sh {} {}; done_",
+        inner.display(),
+        host.display()
+    ))
+    .ok();
+
+    assert_eq!(
+        s.read("host/f"),
+        "the host's file",
+        "the host's file must be untouched"
+    );
+    assert!(
+        !s.exists("inner/f"),
+        "the sandbox's own delete should still happen"
+    );
+}
+
+/// A delete the program wasn't allowed to do leaves nothing to undo, and says so calmly.
+#[test]
+fn a_delete_that_failed_leaves_nothing_to_undo() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = Sandbox::new();
+    s.write("ro/f", "keep");
+    fs::set_permissions(s.path("ro"), fs::Permissions::from_mode(0o555)).unwrap();
+
+    let run = s
+        .run("cmd 'rm ro/f'; rm -f ro/f 2>/dev/null; done_; whoops; echo \"exit=$?\"")
+        .ok();
+
+    fs::set_permissions(s.path("ro"), fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(s.read("ro/f"), "keep");
+    let out = run.stdout();
+    assert!(out.contains("nothing to put back"), "{out}");
+    assert!(!out.contains("skipped"), "{out}");
+    assert!(out.contains("exit=0"), "{out}");
+}
+
 #[test]
 fn exit_code_is_passed_through() {
     let s = Sandbox::new();

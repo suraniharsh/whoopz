@@ -17,7 +17,7 @@
 //! ```
 
 use std::fs::File;
-use std::io::{self, IoSlice, IoSliceMut};
+use std::io::{self, IoSliceMut};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixListener;
 use std::os::unix::process::CommandExt;
@@ -29,8 +29,7 @@ use anyhow::{Context, Result, bail};
 use nix::fcntl::OFlag;
 use nix::sys::signal::{SigHandler, Signal, signal};
 use nix::sys::socket::{
-    AddressFamily, ControlMessage, ControlMessageOwned, MsgFlags, SockFlag, SockType, recvmsg,
-    sendmsg, socketpair,
+    AddressFamily, ControlMessageOwned, MsgFlags, SockFlag, SockType, recvmsg, socketpair,
 };
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::Pid;
@@ -286,12 +285,37 @@ fn attach_filter(program: &[libc::sock_filter], sock: RawFd) -> io::Result<()> {
 }
 
 /// Send a file descriptor over a Unix socket. The kernel copies it into the other process.
+///
+/// Runs in the child between fork and exec, so it allocates nothing: the message lives on the
+/// stack. (Allocating there is only safe while the parent has a single thread.)
 fn send_listener(sock: RawFd, fd: RawFd) -> io::Result<()> {
-    let fds = [fd];
-    let cmsgs = [ControlMessage::ScmRights(&fds)];
     // The fd rides along as "ancillary data", which needs at least one real byte to travel with.
-    let iov = [IoSlice::new(b"!")];
-    sendmsg::<()>(sock, &iov, &cmsgs, MsgFlags::empty(), None)?;
+    let mut byte = *b"!";
+    let mut iov = libc::iovec {
+        iov_base: byte.as_mut_ptr().cast(),
+        iov_len: 1,
+    };
+    // Room for one control message carrying one fd, aligned for `cmsghdr`.
+    let mut space = [0u64; 4];
+    // SAFETY: plain C structures; every pointer points into this stack frame, which outlives
+    // the sendmsg call, and the buffer is large enough for CMSG_SPACE(one int).
+    unsafe {
+        let len = libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) as usize;
+        debug_assert!(len <= std::mem::size_of_val(&space));
+        let mut msg: libc::msghdr = std::mem::zeroed();
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = space.as_mut_ptr().cast();
+        msg.msg_controllen = len as _;
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        (*cmsg).cmsg_level = libc::SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as _;
+        std::ptr::write_unaligned(libc::CMSG_DATA(cmsg).cast::<RawFd>(), fd);
+        if libc::sendmsg(sock, &msg, 0) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
     Ok(())
 }
 

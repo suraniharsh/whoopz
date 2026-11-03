@@ -14,6 +14,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
+use nix::sys::socket::{getsockopt, sockopt};
 
 use crate::session::{Session, lock};
 use crate::undo::{self, Response};
@@ -29,6 +30,12 @@ pub fn serve(listener: UnixListener, session: Arc<Mutex<Session>>) {
 }
 
 fn answer(conn: UnixStream, session: &Mutex<Session>) -> std::io::Result<()> {
+    // The socket sits in a folder only you can open. Check anyway that the caller is you.
+    let peer = getsockopt(&conn, sockopt::PeerCredentials).map_err(std::io::Error::from)?;
+    if peer.uid() != nix::unistd::getuid().as_raw() {
+        return Ok(());
+    }
+
     let mut reader = BufReader::new(&conn);
     let mut request = String::new();
     reader.read_line(&mut request)?;

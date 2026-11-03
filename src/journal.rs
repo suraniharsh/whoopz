@@ -40,6 +40,10 @@ pub enum Change {
         #[serde(with = "path_text")]
         path: PathBuf,
         saved: Saved,
+        /// Which file it was. If that same file is still at `path` at undo time, the delete
+        /// never went through (the program wasn't allowed, say), and there's nothing to undo.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        was: Option<FileId>,
     },
     /// `from` was renamed to `to`. If something was already at `to`, it was replaced.
     Renamed {
@@ -48,6 +52,9 @@ pub enum Change {
         #[serde(with = "path_text")]
         to: PathBuf,
         replaced: Option<Saved>,
+        /// Which file was at `from`. Still there at undo time means the rename never happened.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        was: Option<FileId>,
     },
     /// `a` and `b` swapped places (`renameat2` with `RENAME_EXCHANGE`).
     Exchanged {
@@ -72,6 +79,14 @@ pub enum Change {
         #[serde(with = "path_text")]
         path: PathBuf,
     },
+}
+
+/// A file's identity: the drive it's on and its number there (inode). Unlike its name, it
+/// doesn't change when the file is renamed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileId {
+    pub dev: u64,
+    pub ino: u64,
 }
 
 /// What we kept of something before it was removed or overwritten.

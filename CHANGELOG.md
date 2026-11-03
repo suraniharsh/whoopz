@@ -7,6 +7,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- Whoopz no longer performs deletes and renames for a program. It did so with your full
+  rights and from its own view of the filesystem: for a program in a sandbox or container,
+  that could delete a different file than the one the program meant, and it ignored
+  restrictions on the program (AppArmor, SELinux, Landlock). Every change now goes ahead in
+  the kernel as the program; programs in a sandbox or container aren't saved.
+- The undo socket only answers the user who owns it, and the `WHOOPZ_DEBUG` log file is
+  readable only by you.
+
+### Changed
+
+- Undo checks whether a delete or rename really happened, and skips it quietly if not.
+
 ## [0.1.0] - 2026-11-04
 
 ### Added

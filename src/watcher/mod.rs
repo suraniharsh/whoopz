@@ -24,12 +24,8 @@ pub struct PausedCall {
 /// What to tell the kernel about a paused call.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Reply {
-    /// Let the kernel run the call as if nothing happened.
+    /// Let the kernel run the call, as the program, as if nothing happened.
     Continue,
-    /// We did the call ourselves; it returned this value.
-    Return(i64),
-    /// We did the call ourselves; it failed with this errno.
-    Fail(i32),
 }
 
 pub trait Watcher: Send {

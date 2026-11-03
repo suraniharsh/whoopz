@@ -124,13 +124,6 @@ pub fn link_at(old_dir: &Dir, old: &CStr, new_dir: &Dir, new: &CStr) -> io::Resu
     Ok(())
 }
 
-/// Remove a name (`flags = AT_REMOVEDIR` for an empty folder).
-pub fn unlink_at(dir: &Dir, name: &CStr, flags: libc::c_int) -> io::Result<()> {
-    // SAFETY: valid C string.
-    check(unsafe { libc::unlinkat(dir.raw(), name.as_ptr(), flags) })?;
-    Ok(())
-}
-
 /// Rename, with the `renameat2` flags (`RENAME_NOREPLACE`, `RENAME_EXCHANGE`).
 ///
 /// Called as a raw system call: older C libraries (musl, glibc before 2.28) have no

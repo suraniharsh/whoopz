@@ -115,6 +115,21 @@ fn as_seen_by(pid: u32, name: &[u8]) -> Vec<u8> {
     name.to_vec()
 }
 
+/// Does process `pid` see the same filesystem as Whoopz: the same mount namespace and the same
+/// root? Programs in a sandbox or a container (bubblewrap, flatpak, podman, `unshare -m`) don't:
+/// there, `/home/x` can be a different file than it is for Whoopz.
+pub fn sees_same_files(pid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    /// A file's drive and number.
+    type Id = Option<(u64, u64)>;
+    let id = |path: &str| -> Id { std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino())) };
+    static OURS: std::sync::OnceLock<(Id, Id)> = std::sync::OnceLock::new();
+    let (our_ns, our_root) = *OURS.get_or_init(|| (id("/proc/self/ns/mnt"), id("/")));
+    our_ns.is_some()
+        && id(&format!("/proc/{pid}/ns/mnt")) == our_ns
+        && id(&format!("/proc/{pid}/root")) == our_root
+}
+
 /// `/proc` and `/sys` are the kernel's views of itself, not files anyone wants back.
 pub fn is_pseudo(path: &std::path::Path) -> bool {
     path.starts_with("/proc") || path.starts_with("/sys")

@@ -7,10 +7,11 @@
 //! 1. [`prepare`] reads the call's paths out of the paused process's memory.
 //! 2. [`act`] saves and journals, and answers the call.
 //!
-//! **Removes and renames the watcher does itself** and hands the result back. That way it
-//! knows whether they worked, and it acts on exactly the path it saved, so the program can't
-//! change the path in between. **Opens, truncates and creates** go ahead in the kernel
-//! (`Continue`), because the program needs its own file descriptor back.
+//! Every call then **goes ahead in the kernel, as the program** (`Continue`). An earlier version
+//! performed deletes and renames itself, to know whether they worked. That was wrong: the
+//! watcher has your full rights and its own view of the filesystem, so for a program in a
+//! sandbox it deleted a different file, and it could ignore restrictions put on the program.
+//! Undo checks instead whether a change really happened (see `FileId`).
 
 use std::ffi::OsString;
 use std::fs::File;
@@ -20,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
 use crate::calls::{FileCall, OpenFlags};
-use crate::journal::{Change, Saved};
+use crate::journal::{Change, FileId, Saved};
 use crate::procfs::{self, Location};
 use crate::session::{MAX_COPY, Session};
 use crate::sys;
@@ -135,11 +136,19 @@ pub fn prepare(pid: u32, call: FileCall) -> io::Result<Prepared> {
     })
 }
 
-/// Save, journal, and decide the answer to the paused call.
+/// Save and journal what a paused call is about to change. The call itself then goes ahead
+/// in the kernel, as the program: with its own permissions, security rules and view of the
+/// filesystem. Whoopz never changes a file on a program's behalf.
 pub fn act(call: Prepared, s: &mut Session) -> Reply {
     match call {
-        Prepared::Remove { at, flags } => remove(s, at, flags),
-        Prepared::Rename { from, to, flags } => rename(s, from, to, flags),
+        Prepared::Remove { at, flags } => {
+            remove(s, at, flags);
+            Reply::Continue
+        }
+        Prepared::Rename { from, to, flags } => {
+            rename(s, from, to, flags);
+            Reply::Continue
+        }
         Prepared::Open { at, flags } => {
             open(s, &at, flags);
             Reply::Continue
@@ -173,83 +182,75 @@ pub fn act(call: Prepared, s: &mut Session) -> Reply {
     }
 }
 
-/// `rm`: keep the file under a second name in the stash, then remove the original name.
-fn remove(s: &mut Session, at: Location, flags: i32) -> Reply {
+/// `rm`: keep the file under a second name in the stash. The program's own call then removes
+/// the original name.
+fn remove(s: &mut Session, at: Location, flags: i32) {
+    let Ok(st) = sys::lstat_at(&at.dir, &at.name) else {
+        return; // nothing there: the call will fail on its own
+    };
     let saved = if flags & libc::AT_REMOVEDIR != 0 {
         // Only empty folders can be removed, so all there is to keep is the permissions.
-        match sys::lstat_at(&at.dir, &at.name) {
-            Ok(st) if sys::is_dir(&st) => Some(Saved::Dir {
-                mode: sys::mode_bits(&st),
-            }),
-            _ => None,
+        if !sys::is_dir(&st) {
+            return;
+        }
+        Saved::Dir {
+            mode: sys::mode_bits(&st),
         }
     } else {
-        save_existing(s, &at)
+        match save_existing(s, &at) {
+            Some(saved) => saved,
+            None => return,
+        }
     };
-
-    match sys::unlink_at(&at.dir, &at.name, flags) {
-        Ok(()) => {
-            if let Some(saved) = saved {
-                journal(
-                    s,
-                    Change::Deleted {
-                        path: at.path,
-                        saved,
-                    },
-                );
-            }
-            Reply::Return(0)
-        }
-        Err(e) => {
-            forget(s, saved);
-            Reply::Fail(errno(&e))
-        }
-    }
+    journal(
+        s,
+        Change::Deleted {
+            path: at.path,
+            saved,
+            was: Some(file_id(&st)),
+        },
+    );
 }
 
 /// `mv`: write down both names. If something is about to be replaced, keep it first.
-fn rename(s: &mut Session, from: Location, to: Location, flags: u32) -> Reply {
+fn rename(s: &mut Session, from: Location, to: Location, flags: u32) {
     let exchange = flags & libc::RENAME_EXCHANGE != 0;
     let noreplace = flags & libc::RENAME_NOREPLACE != 0;
 
+    let Ok(from_st) = sys::lstat_at(&from.dir, &from.name) else {
+        return; // nothing to move: the call will fail on its own
+    };
     // Renaming a file onto another name for the same file changes nothing.
-    let same = match (
-        sys::lstat_at(&from.dir, &from.name),
-        sys::lstat_at(&to.dir, &to.name),
-    ) {
-        (Ok(a), Ok(b)) => a.st_dev == b.st_dev && a.st_ino == b.st_ino,
-        _ => false,
-    };
+    if let Ok(to_st) = sys::lstat_at(&to.dir, &to.name)
+        && file_id(&from_st) == file_id(&to_st)
+    {
+        return;
+    }
 
-    let replaced = if exchange || noreplace || same {
-        None
+    let change = if exchange {
+        Change::Exchanged {
+            a: from.path,
+            b: to.path,
+        }
     } else {
-        save_existing(s, &to)
+        Change::Renamed {
+            replaced: if noreplace {
+                None
+            } else {
+                save_existing(s, &to)
+            },
+            from: from.path,
+            to: to.path,
+            was: Some(file_id(&from_st)),
+        }
     };
+    journal(s, change);
+}
 
-    match sys::rename_at(&from.dir, &from.name, &to.dir, &to.name, flags) {
-        Ok(()) => {
-            if !same {
-                let change = if exchange {
-                    Change::Exchanged {
-                        a: from.path,
-                        b: to.path,
-                    }
-                } else {
-                    Change::Renamed {
-                        from: from.path,
-                        to: to.path,
-                        replaced,
-                    }
-                };
-                journal(s, change);
-            }
-            Reply::Return(0)
-        }
-        Err(e) => {
-            forget(s, replaced);
-            Reply::Fail(errno(&e))
-        }
+fn file_id(st: &sys::Stat) -> FileId {
+    FileId {
+        dev: st.st_dev,
+        ino: st.st_ino,
     }
 }
 
@@ -375,13 +376,6 @@ fn not_saved(path: &Path, reason: String) -> Saved {
     Saved::Nothing { reason }
 }
 
-/// The change didn't happen after all: drop what we saved for it.
-fn forget(s: &Session, saved: Option<Saved>) {
-    if let Some(Saved::Stash { file }) = saved {
-        s.discard_stash(&file);
-    }
-}
-
 fn journal(s: &mut Session, change: Change) {
     if let Err(e) = s.record(change) {
         eprintln!("whoops: couldn't write the journal: {e}");
@@ -390,8 +384,4 @@ fn journal(s: &mut Session, change: Change) {
 
 fn warn(path: &Path, reason: &str) {
     eprintln!("whoops: couldn't save {}: {reason}", path.display());
-}
-
-fn errno(e: &io::Error) -> i32 {
-    e.raw_os_error().unwrap_or(libc::EIO)
 }

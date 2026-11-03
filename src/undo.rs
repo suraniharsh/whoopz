@@ -13,7 +13,7 @@ use std::io;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
-use crate::journal::{self, Change, Line, Saved};
+use crate::journal::{self, Change, FileId, Line, Saved};
 use crate::session::{MAX_COPY, Session};
 use crate::sys;
 
@@ -120,7 +120,8 @@ pub fn undo(s: &mut Session, which: Option<u64>) -> Response {
     let mut skipped = Vec::new();
     for change in target.changes.iter().rev() {
         match undo_change(s, change) {
-            Ok(msg) => done.push(msg),
+            Ok(Some(msg)) => done.push(msg),
+            Ok(None) => {} // nothing to do: that change never went through
             Err(msg) => skipped.push(msg),
         }
     }
@@ -129,6 +130,9 @@ pub fn undo(s: &mut Session, which: Option<u64>) -> Response {
     }
 
     let mut text = format!("Undid {}: {}\n", target.id, target.text);
+    if done.is_empty() && skipped.is_empty() {
+        text += "  nothing to put back: its changes didn't go through\n";
+    }
     for msg in done.iter().take(SHOW) {
         text += &format!("  {msg}\n");
     }
@@ -144,14 +148,26 @@ pub fn undo(s: &mut Session, which: Option<u64>) -> Response {
     }
 }
 
-fn undo_change(s: &mut Session, change: &Change) -> Result<String, String> {
+/// `Ok(None)`: nothing to do, because the change never went through.
+fn undo_change(s: &mut Session, change: &Change) -> Result<Option<String>, String> {
     match change {
-        Change::Deleted { path, saved } => {
+        Change::Deleted { path, saved, was } => {
+            if still_there(path, *was)? {
+                return Ok(None);
+            }
             restore(s, path, saved)?;
-            Ok(format!("restored {}", path.display()))
+            Ok(Some(format!("restored {}", path.display())))
         }
 
-        Change::Renamed { from, to, replaced } => {
+        Change::Renamed {
+            from,
+            to,
+            replaced,
+            was,
+        } => {
+            if still_there(from, *was)? {
+                return Ok(None);
+            }
             if lstat(to)?.is_none() {
                 return Err(format!("{} isn't there anymore", to.display()));
             }
@@ -165,7 +181,11 @@ fn undo_change(s: &mut Session, change: &Change) -> Result<String, String> {
                     format!("moved {} back, but not what it replaced: {e}", to.display())
                 })?;
             }
-            Ok(format!("moved {} back to {}", to.display(), from.display()))
+            Ok(Some(format!(
+                "moved {} back to {}",
+                to.display(),
+                from.display()
+            )))
         }
 
         Change::Exchanged { a, b } => {
@@ -176,7 +196,11 @@ fn undo_change(s: &mut Session, change: &Change) -> Result<String, String> {
                     b.display()
                 )
             })?;
-            Ok(format!("swapped {} and {} back", a.display(), b.display()))
+            Ok(Some(format!(
+                "swapped {} and {} back",
+                a.display(),
+                b.display()
+            )))
         }
 
         Change::Overwritten { path, saved } => {
@@ -185,28 +209,36 @@ fn undo_change(s: &mut Session, change: &Change) -> Result<String, String> {
             };
             write_back(&s.stash_path(file), path)
                 .map_err(|e| format!("couldn't put back {}: {e}", path.display()))?;
-            Ok(format!("put back the old contents of {}", path.display()))
+            Ok(Some(format!(
+                "put back the old contents of {}",
+                path.display()
+            )))
         }
 
         Change::Created { path } => match lstat(path)? {
-            None => Ok(format!("{} was already gone", path.display())),
+            None => Ok(None),
             Some(st) if sys::is_dir(&st) => {
                 Err(format!("{} is a folder now; left it", path.display()))
             }
             Some(_) => {
                 move_to_stash(s, path)?;
-                Ok(format!("removed {}", path.display()))
+                Ok(Some(format!("removed {}", path.display())))
             }
         },
 
         Change::CreatedDir { path } => match fs::remove_dir(path) {
-            Ok(()) => Ok(format!("removed folder {}", path.display())),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                Ok(format!("{} was already gone", path.display()))
-            }
+            Ok(()) => Ok(Some(format!("removed folder {}", path.display()))),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(format!("left folder {}: {e}", path.display())),
         },
     }
+}
+
+/// Is the very same file (`was`) still at `path`? Then the delete or rename never went
+/// through: the program wasn't allowed to, or it failed.
+fn still_there(path: &Path, was: Option<FileId>) -> Result<bool, String> {
+    let Some(was) = was else { return Ok(false) };
+    Ok(lstat(path)?.is_some_and(|st| st.st_dev == was.dev && st.st_ino == was.ino))
 }
 
 /// Put a removed or replaced thing back at `path`. Never overwrites anything.
