@@ -140,7 +140,7 @@ is only freed when the session is cleaned up. Sessions are removed a week after 
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) and [the vision](docs/vision.md). Whoopz works with
+See [CONTRIBUTING.md](CONTRIBUTING.md), [the vision](docs/vision.md) and [the roadmap](docs/roadmap.md). Whoopz works with
 bash, zsh, fish, nushell and elvish today; to add your shell, see [docs/hooks.md](docs/hooks.md).
 
 ## License

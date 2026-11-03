@@ -1,7 +1,8 @@
 # Contributing to Whoopz
 
-Before you build a feature, read [the vision](docs/vision.md). When unsure, open an issue first,
-so no one spends time on a pull request that doesn't fit.
+Before you build a feature, read [the vision](docs/vision.md) (including what Whoopz will never
+do) and [the roadmap](docs/roadmap.md). When unsure, open an issue first, so no one spends time
+on a pull request that doesn't fit.
 
 ## Building
 
