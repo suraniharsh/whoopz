@@ -56,6 +56,22 @@ pub enum Prepared {
     },
 }
 
+impl Prepared {
+    /// The paths this call is about, for debug output.
+    pub fn describe(&self) -> String {
+        match self {
+            Prepared::Remove { at, .. }
+            | Prepared::Open { at, .. }
+            | Prepared::Truncate { at, .. }
+            | Prepared::Create { at, .. } => at.path.display().to_string(),
+            Prepared::Rename { from, to, .. } => {
+                format!("{} -> {}", from.path.display(), to.path.display())
+            }
+            Prepared::Ftruncate { path, .. } => path.display().to_string(),
+        }
+    }
+}
+
 /// Read the paths a paused call points to.
 pub fn prepare(pid: u32, call: FileCall) -> io::Result<Prepared> {
     let at = |dir: i32, addr: u64| -> io::Result<Location> {

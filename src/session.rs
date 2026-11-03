@@ -140,6 +140,14 @@ impl Session {
         self.state = State::Idle;
     }
 
+    /// The running command's text, if a hook said one is running.
+    pub fn current_text(&self) -> Option<&str> {
+        match &self.state {
+            State::Running { text, .. } => Some(text),
+            State::Idle => None,
+        }
+    }
+
     pub fn is_running(&self) -> bool {
         matches!(self.state, State::Running { .. })
     }

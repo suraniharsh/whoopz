@@ -43,7 +43,7 @@ use crate::{engine, filter};
 /// Set inside a watched shell, so `whoops shell` can't be started inside itself.
 const ACTIVE_VAR: &str = "WHOOPZ_ACTIVE";
 
-/// Set to 1 to print every paused call and the answer it got.
+/// Set to 1 to print every paused call and the answer it got, or to a path to write it there.
 const DEBUG_VAR: &str = "WHOOPZ_DEBUG";
 
 /// Start the shell under the watcher and return its exit code once it ends.
@@ -123,7 +123,8 @@ pub fn run_shell(args: &[String]) -> Result<i32> {
     ignore_terminal_signals();
 
     let session = Arc::new(Mutex::new(session));
-    let debug = std::env::var_os(DEBUG_VAR).is_some_and(|v| v == "1");
+    let mut debug = engine::Debug::from_env(std::env::var_os(DEBUG_VAR));
+    debug.line(&format!("shell={shell}\tshell_pid={shell_pid}"));
     let watcher = Box::new(SeccompWatcher::new(listener));
     {
         let session = session.clone();

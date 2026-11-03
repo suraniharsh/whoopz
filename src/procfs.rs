@@ -102,3 +102,50 @@ pub fn open_fd(pid: u32, fd: i32) -> io::Result<File> {
 fn clean(path: PathBuf) -> PathBuf {
     path.components().collect()
 }
+
+/// What `/proc/<pid>/stat` says about a process's place in the process tree.
+#[derive(Debug)]
+pub struct ProcInfo {
+    /// The program's name (at most 15 characters).
+    pub comm: String,
+    pub ppid: i32,
+    /// Process group. An interactive shell puts each command (a pipeline counts as one) in its
+    /// own group, so Ctrl-C reaches only that command.
+    pub pgid: i32,
+    /// Session: everything started from one terminal login.
+    pub sid: i32,
+    /// The process group the terminal currently sends keyboard input and Ctrl-C to.
+    pub tpgid: i32,
+}
+
+pub fn info(pid: u32) -> io::Result<ProcInfo> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    // "1234 (name) S 1 1234 1234 34816 1234 …". The name can contain spaces and brackets,
+    // so split at the *last* ')'.
+    let bad = || io::Error::from_raw_os_error(libc::EINVAL);
+    let open = stat.find('(').ok_or_else(bad)?;
+    let close = stat.rfind(')').ok_or_else(bad)?;
+    let comm = stat[open + 1..close].to_string();
+    let fields: Vec<&str> = stat[close + 1..].split_whitespace().collect();
+    let num = |i: usize| -> io::Result<i32> {
+        fields.get(i).and_then(|f| f.parse().ok()).ok_or_else(bad)
+    };
+    // After the name: state ppid pgrp session tty_nr tpgid …
+    Ok(ProcInfo {
+        comm,
+        ppid: num(1)?,
+        pgid: num(2)?,
+        sid: num(3)?,
+        tpgid: num(5)?,
+    })
+}
+
+/// The command line a process was started with, arguments joined by spaces.
+pub fn cmdline(pid: u32) -> String {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+    raw.split(|&b| b == 0)
+        .filter(|arg| !arg.is_empty())
+        .map(|arg| String::from_utf8_lossy(arg).into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
