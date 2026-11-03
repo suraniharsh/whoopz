@@ -9,36 +9,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `whoops shell` starts your shell (bash or zsh) with Whoopz watching it.
-- `whoops` undoes the last command that changed files: deletes (including `rm -rf`), moves
-  and renames, overwrites (`>`, `cp` onto a file, `sed -i`), truncates, and new files and
-  folders.
+- `whoops shell` starts your shell with Whoopz watching it: bash, zsh, fish, nushell or elvish.
+  It starts the shell you typed it in, or the one you pick with `--shell`.
+- `whoops` undoes the last command that changed files: deletes (including `rm -rf`), moves and
+  renames, overwrites (`>`, `cp` onto a file, `sed -i`), truncates, and new files and folders.
+  Each line you type or paste is one command.
 - `whoops list` shows what each command changed, and `whoops <n>` undoes a specific one.
 - Undo never overwrites anything: if something new is in the way, that step is skipped and
   reported.
-- fish support. `whoops shell` now starts the shell you typed it in (or pick one with
-  `--shell fish`), so it works when your terminal runs fish but your login shell is bash.
-- A shell saving its own history (fish does this from a background thread, at any moment)
-  is no longer counted as part of your command.
-- Whoopz is now one static file that runs on any Linux 5.5+ distribution (x86_64 and ARM64),
-  with nothing to install: it no longer needs libseccomp. It also watches 32-bit programs.
-- Background jobs get their own `[background]` entry in `whoops list` instead of being mixed
-  into whatever command is running. Plain `whoops` leaves them alone; `whoops <n>` undoes one.
-  Their changes after the prompt is back are now saved too.
-- nushell support, including its built-in commands like `rm` and `save`, which change files
-  from inside the shell itself.
-- elvish support. elvish only takes one rc file, so Whoopz's loads yours first; everything
-  it defines is still there.
-- `/dev/fd/…`, `/dev/stdout` and `/proc/self/…` are looked at from the program's side, and
-  nothing in `/proc` or `/sys` is recorded.
-- `whoops shell --fallback`: if Whoopz can't start, say why and start the shell without it.
-  For terminal configs, so a problem never leaves you without a terminal.
-- Clear errors on systems where Whoopz can't work (old kernel, seccomp blocked by a sandbox,
-  `ptrace_scope` 2 or 3).
-- `WHOOPZ_DEBUG=1` (or a file path) shows every paused call and where its process sits in the
-  process tree.
-
-### Fixed
-
-- Pasting several lines into bash made them one command, so one `whoops` undid all of them.
-  Each pasted line is now its own command.
+- Deleted files are kept with a hard link: instant and free, whatever their size. Files on
+  another drive than `~/.local/share` are copied, up to 512 MB.
+- Background jobs get their own `[background]` entry, never mixed into the command you're
+  running. Plain `whoops` leaves them alone.
+- A shell saving its own history is never counted as part of your command.
+- One static file for any Linux 5.5 or newer, x86_64 or ARM64, with nothing else to install.
+  32-bit programs are watched too. (The ARM64 build hasn't been run on ARM hardware yet.)
+- `whoops shell --fallback`: if Whoopz can't start, it says why and starts the shell without
+  it, so a terminal config can't leave you without a terminal.
+- Clear errors on systems where Whoopz can't work: an old kernel, seccomp blocked by a
+  sandbox, or `ptrace_scope` 2 or 3.
+- `WHOOPZ_DEBUG=1` (or a file path) shows every call Whoopz pauses.
