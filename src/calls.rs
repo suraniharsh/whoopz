@@ -117,6 +117,15 @@ pub fn decode(name: &str, a: &[u64; 6]) -> Option<FileCall> {
             fd: int(0),
             len: a[1] as i64,
         },
+        // 32-bit x86: the 64-bit length is split over two arguments, low half first.
+        "truncate64" => FileCall::Truncate {
+            path: a[0],
+            len: (a[1] & 0xFFFF_FFFF | a[2] << 32) as i64,
+        },
+        "ftruncate64" => FileCall::Ftruncate {
+            fd: int(0),
+            len: (a[1] & 0xFFFF_FFFF | a[2] << 32) as i64,
+        },
 
         "mkdir" => FileCall::Create {
             dir: CWD,

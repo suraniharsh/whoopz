@@ -30,20 +30,30 @@ Deleted files are kept with a hard link, so even a 10 GB file is saved instantly
 
 ## Install
 
-You need Linux 5.5 or newer, Rust, and `libseccomp` (`libseccomp` on Arch, `libseccomp-dev` on
-Debian/Ubuntu).
+Whoopz is one static file with no dependencies. It runs on any Linux distribution with
+**Linux 5.5 or newer**, on x86_64 or ARM64. Nothing else needs to be installed: not
+libseccomp, not a particular C library.
+
+Download `whoops` from the [releases](https://github.com/suraniharsh/whoopz/releases), then:
 
 ```sh
-git clone https://github.com/suraniharsh/whoopz
-cd whoopz
-cargo install --path . --locked              # puts `whoops` in ~/.cargo/bin
-# or: cargo install --path . --locked --root ~/.local   (puts it in ~/.local/bin)
+tar -xzf whoops-*-linux-x86_64.tar.gz
+install -m 755 whoops-*/whoops ~/.local/bin/whoops     # any folder on your PATH
+```
+
+Or build it yourself with [Rust](https://rustup.rs):
+
+```sh
+git clone https://github.com/suraniharsh/whoopz && cd whoopz
+cargo build --release --target x86_64-unknown-linux-musl   # or aarch64-unknown-linux-musl
+install -m 755 target/x86_64-unknown-linux-musl/release/whoops ~/.local/bin/whoops
 ```
 
 ## Use
 
 ```sh
-whoops shell          # start your shell with Whoopz watching it
+whoops shell          # start the shell you're in (bash, zsh or fish) with Whoopz watching it
+whoops shell --shell fish
 ```
 
 Inside that shell, work as usual. When something goes wrong:
@@ -67,10 +77,25 @@ Undid 2: rm -rf proj
   restored proj/README
 ```
 
-To start every terminal this way, add this to the end of `~/.bashrc` (or `~/.zshrc`):
+To start every terminal this way, the simplest is to set it in your terminal. For kitty, in
+`kitty.conf`:
+
+```
+shell whoops shell --shell fish
+```
+
+Or at the end of `~/.bashrc` / `~/.zshrc`:
 
 ```sh
 [ -z "$WHOOPZ_ACTIVE" ] && command -v whoops >/dev/null && whoops shell && exit
+```
+
+Or in `~/.config/fish/config.fish`:
+
+```fish
+if status is-interactive; and not set -q WHOOPZ_ACTIVE; and command -q whoops
+    whoops shell; and exit
+end
 ```
 
 Set `WHOOPZ_DEBUG=1` before `whoops shell` to see every call Whoopz pauses.

@@ -18,8 +18,7 @@ path = "src/main.rs"
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 libc = "0.2.191"
-libseccomp = "0.4.0"
-nix = { version = "0.31.3", features = ["fs", "poll", "process", "signal", "socket", "uio"] }
+nix = { version = "0.31.3", features = ["feature", "fs", "poll", "process", "signal", "socket", "uio"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 
@@ -27,3 +26,9 @@ serde_json = "1.0.154"
 libc = "0.2.191"
 nix = { version = "0.31.3", features = ["term"] }
 tempfile = "3.27.0"
+
+[profile.release]
+# One small static file to hand out: drop debug symbols, optimise across crates.
+strip = "symbols"
+lto = "thin"
+codegen-units = 1

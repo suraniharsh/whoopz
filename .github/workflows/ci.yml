@@ -21,10 +21,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: system dependencies
+      # Shells for the interactive tests. Whoopz itself needs nothing installed.
+      - name: shells
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libseccomp-dev pkg-config zsh fish
+          sudo apt-get install -y --no-install-recommends zsh fish
 
       # Keep in step with rust-toolchain.toml.
       - uses: dtolnay/rust-toolchain@master
@@ -44,3 +45,29 @@ jobs:
 
       - name: tests
         run: cargo test --locked
+
+  portable:
+    name: static binary on other distributions
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: musl
+          cache-on-failure: true
+
+      - name: build x86_64 (static)
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+
+      - name: run it on Ubuntu 20.04, Debian, Fedora and Alpine
+        run: scripts/portable-check.sh target/x86_64-unknown-linux-musl/release/whoops
+
+      # Can't run here (no ARM machine), but it must keep building.
+      - name: build aarch64 (static)
+        run: cargo build --release --locked --target aarch64-unknown-linux-musl

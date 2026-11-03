@@ -1,0 +1,3 @@
+# Static ARM64 builds without installing a cross-compiler: Rust ships its own linker.
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"

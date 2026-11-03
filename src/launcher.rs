@@ -89,6 +89,7 @@ pub fn run_shell(shell_flag: Option<&str>, args: &[String]) -> Result<i32> {
     if std::env::var_os(ACTIVE_VAR).is_some() {
         bail!("already inside a whoops shell");
     }
+    check_system()?;
     let shell_path = choose_shell(shell_flag)?;
     let shell = shell_path.display().to_string();
 
@@ -139,18 +140,17 @@ pub fn run_shell(shell_flag: Option<&str>, args: &[String]) -> Result<i32> {
     )?;
     let theirs_fd = theirs.as_raw_fd();
     let mark_fd = mark_write.as_raw_fd();
+    let program = filter::program();
     // SAFETY: the closure runs in the child right after fork. That is only risky when the
     // parent has other threads (one might hold a lock the child then waits on forever). We
     // haven't started any yet; they come after the spawn.
     unsafe {
         cmd.pre_exec(move || {
             place_mark_fd(mark_fd)?;
-            attach_filter(theirs_fd).map_err(io::Error::other)
+            attach_filter(&program, theirs_fd)
         });
     }
-    let child = cmd
-        .spawn()
-        .with_context(|| format!("could not start {shell}"))?;
+    let child = cmd.spawn().map_err(|e| explain_spawn_error(e, &shell))?;
     let shell_pid = Pid::from_raw(child.id() as i32);
     session.set_shell_pid(child.id());
 
@@ -186,6 +186,50 @@ pub fn run_shell(shell_flag: Option<&str>, args: &[String]) -> Result<i32> {
     Ok(code)
 }
 
+/// Stop early, with a clear reason, on systems where Whoopz can't work.
+fn check_system() -> Result<()> {
+    // Letting a paused call go ahead (SECCOMP_USER_NOTIF_FLAG_CONTINUE) arrived in Linux 5.5.
+    let release = nix::sys::utsname::uname()?
+        .release()
+        .to_string_lossy()
+        .into_owned();
+    let mut parts = release.split(|c: char| !c.is_ascii_digit());
+    let major: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    let minor: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    if (major, minor) < (5, 5) {
+        bail!("Whoopz needs Linux 5.5 or newer; this is {release}");
+    }
+
+    // Whoopz reads paths out of the programs it watches. With ptrace_scope 2 or 3, Linux
+    // allows that only to root (2) or nobody (3), so nothing could be saved.
+    if let Ok(scope) = std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope")
+        && let Ok(scope) = scope.trim().parse::<u32>()
+        && scope >= 2
+    {
+        bail!(
+            "kernel.yama.ptrace_scope is {scope}, which stops Whoopz from seeing which files \
+             programs change. It works with 0 or 1 (the usual default)."
+        );
+    }
+    Ok(())
+}
+
+/// Turn a failure to attach the filter into something a person can act on.
+fn explain_spawn_error(e: io::Error, shell: &str) -> anyhow::Error {
+    let why = match e.raw_os_error() {
+        Some(libc::ENOSYS) => "this kernel was built without seccomp",
+        Some(libc::EINVAL) => {
+            "this kernel doesn't support seccomp user notification (needs Linux 5.5 or newer)"
+        }
+        Some(libc::EACCES) | Some(libc::EPERM) => {
+            "something (a container or sandbox) doesn't allow attaching a seccomp filter"
+        }
+        Some(libc::EBUSY) => "this process is already being watched in a way that conflicts",
+        _ => return anyhow::Error::new(e).context(format!("could not start {shell}")),
+    };
+    anyhow::anyhow!("could not start {shell}: {why} ({e})")
+}
+
 /// Reap children until `shell` exits. Returns its exit code (128 + signal if it was killed).
 fn wait_for(shell: Pid) -> i32 {
     loop {
@@ -217,31 +261,23 @@ fn place_mark_fd(fd: RawFd) -> io::Result<()> {
 }
 
 /// Runs in the child: attach the filter, then hand the listener to the parent.
-fn attach_filter(sock: RawFd) -> Result<()> {
-    let ctx = filter::build()?;
-
-    // Loading also sets `no_new_privs`, which Linux requires before a normal user may attach a
-    // filter. It means setuid programs like `sudo` can't gain privileges inside the shell.
-    ctx.load()?;
+fn attach_filter(program: &[libc::sock_filter], sock: RawFd) -> io::Result<()> {
+    let listener = filter::attach(program)?;
 
     // From here on, this process is watched. It must not make a paused call before the parent
     // has the listener: no one would be there to answer, and both sides would wait forever.
     // Sending on a socket is not a paused call, so this is safe.
-    let listener = ctx.get_notify_fd()?;
-    send_listener(sock, listener)?;
-
-    // The listener was opened with CLOEXEC, so the exec into the shell closes our copy.
-    Ok(())
+    send_listener(sock, listener.as_raw_fd())
+    // `listener` is closed here; the parent has its own copy now.
 }
 
 /// Send a file descriptor over a Unix socket. The kernel copies it into the other process.
-fn send_listener(sock: RawFd, fd: RawFd) -> Result<()> {
+fn send_listener(sock: RawFd, fd: RawFd) -> io::Result<()> {
     let fds = [fd];
     let cmsgs = [ControlMessage::ScmRights(&fds)];
     // The fd rides along as "ancillary data", which needs at least one real byte to travel with.
     let iov = [IoSlice::new(b"!")];
-    sendmsg::<()>(sock, &iov, &cmsgs, MsgFlags::empty(), None)
-        .context("could not send the listener to the watcher")?;
+    sendmsg::<()>(sock, &iov, &cmsgs, MsgFlags::empty(), None)?;
     Ok(())
 }
 

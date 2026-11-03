@@ -132,6 +132,9 @@ pub fn unlink_at(dir: &Dir, name: &CStr, flags: libc::c_int) -> io::Result<()> {
 }
 
 /// Rename, with the `renameat2` flags (`RENAME_NOREPLACE`, `RENAME_EXCHANGE`).
+///
+/// Called as a raw system call: older C libraries (musl, glibc before 2.28) have no
+/// `renameat2()` function, though every kernel Whoopz runs on has the call.
 pub fn rename_at(
     old_dir: &Dir,
     old: &CStr,
@@ -140,15 +143,19 @@ pub fn rename_at(
     flags: libc::c_uint,
 ) -> io::Result<()> {
     // SAFETY: valid C strings.
-    check(unsafe {
-        libc::renameat2(
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
             old_dir.raw(),
             old.as_ptr(),
             new_dir.raw(),
             new.as_ptr(),
             flags,
         )
-    })?;
+    };
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
     Ok(())
 }
 

@@ -5,13 +5,22 @@ so no one spends time on a pull request that doesn't fit.
 
 ## Building
 
-You need [rustup](https://rustup.rs), which picks up `rust-toolchain.toml`, and the `libseccomp`
-development package from your distribution (`libseccomp` on Arch, `libseccomp-dev` on
-Debian/Ubuntu).
+You need [rustup](https://rustup.rs), which picks up `rust-toolchain.toml`. Nothing else:
+Whoopz talks to the kernel directly, without libseccomp.
 
 ```sh
 cargo build
 cargo run --bin whoops
+```
+
+The interactive tests use bash, and zsh and fish when they're installed (they're skipped
+otherwise).
+
+Release builds are static, so one file runs on any distribution:
+
+```sh
+cargo build --release --target x86_64-unknown-linux-musl
+scripts/portable-check.sh target/x86_64-unknown-linux-musl/release/whoops   # needs Docker
 ```
 
 ## Testing safely

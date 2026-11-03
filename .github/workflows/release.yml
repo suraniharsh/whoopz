@@ -1,0 +1,48 @@
+name: release
+
+# Push a tag like v0.1.0 to publish static binaries for x86_64 and ARM64.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
+
+      - name: build
+        run: |
+          cargo build --release --locked --target x86_64-unknown-linux-musl
+          cargo build --release --locked --target aarch64-unknown-linux-musl
+
+      - name: check the x86_64 binary on other distributions
+        run: scripts/portable-check.sh target/x86_64-unknown-linux-musl/release/whoops
+
+      - name: package
+        run: |
+          mkdir dist
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            arch=${target%%-*}
+            name="whoops-${GITHUB_REF_NAME}-linux-${arch}"
+            mkdir "$name"
+            cp "target/$target/release/whoops" README.md LICENSE CHANGELOG.md "$name/"
+            tar -czf "dist/$name.tar.gz" "$name"
+          done
+          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
+
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes "See CHANGELOG.md."

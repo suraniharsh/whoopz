@@ -1,16 +1,25 @@
 //! A [`Watcher`] built on seccomp user notification.
 //!
 //! The kernel sends a notice down the listener for each paused call, and we answer on the same
-//! listener. See `man 2 seccomp_unotify`.
+//! listener, with three `ioctl` calls (see `man 2 seccomp_unotify`):
+//!
+//! - `NOTIF_RECV`: wait for the next notice (call number, architecture, arguments, pid)
+//! - `NOTIF_SEND`: answer it (let it run, or hand back a result we produced ourselves)
+//! - `NOTIF_ID_VALID`: is that process still paused on that call?
 
+use std::io;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 
 use anyhow::Result;
-use libseccomp::{ScmpNotifReq, ScmpNotifResp, ScmpNotifRespFlags, notify_id_valid};
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
 use super::{PausedCall, Reply, Watcher};
+use crate::filter;
+
+/// `NOTIF_ID_VALID` as Linux 5.0 to 5.16 defined it. 5.17 fixed its direction bits (the
+/// number `libc` has), but still accepts this original one, so it works on every kernel.
+const NOTIF_ID_VALID_ANY_KERNEL: libc::Ioctl = 0x8008_2102u32 as libc::Ioctl;
 
 pub struct SeccompWatcher {
     /// The listener the kernel sends notices on. Closing it releases every paused process.
@@ -20,6 +29,20 @@ pub struct SeccompWatcher {
 impl SeccompWatcher {
     pub fn new(listener: OwnedFd) -> Self {
         Self { listener }
+    }
+
+    fn ioctl<T>(&self, request: libc::Ioctl, arg: &mut T) -> io::Result<()> {
+        loop {
+            // SAFETY: `arg` is the struct this request expects, valid for the whole call.
+            let ret = unsafe { libc::ioctl(self.listener.as_raw_fd(), request, arg as *mut T) };
+            if ret == 0 {
+                return Ok(());
+            }
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::EINTR) {
+                return Err(err);
+            }
+        }
     }
 }
 
@@ -43,15 +66,13 @@ impl Watcher for SeccompWatcher {
             return Ok(None);
         }
 
-        let req = ScmpNotifReq::receive(self.listener.as_raw_fd())?;
+        // The kernel insists the struct is all zeroes going in.
+        // SAFETY: seccomp_notif is plain integers; all zeroes is a valid value.
+        let mut req: libc::seccomp_notif = unsafe { std::mem::zeroed() };
+        self.ioctl(libc::SECCOMP_IOCTL_NOTIF_RECV, &mut req)?;
 
-        // The notice carries a number; the name depends on the architecture (x86_64 or 32-bit).
-        let name = req
-            .data
-            .syscall
-            .get_name_by_arch(req.data.arch)
-            .unwrap_or_else(|_| format!("syscall {}", req.data.syscall));
-
+        let name = filter::name_of(req.data.arch, req.data.nr)
+            .map_or_else(|| format!("syscall {}", req.data.nr), str::to_string);
         Ok(Some(PausedCall {
             id: req.id,
             pid: req.pid,
@@ -61,18 +82,25 @@ impl Watcher for SeccompWatcher {
     }
 
     fn is_valid(&self, call: &PausedCall) -> bool {
-        notify_id_valid(self.listener.as_raw_fd(), call.id).is_ok()
+        let mut id = call.id;
+        self.ioctl(NOTIF_ID_VALID_ANY_KERNEL, &mut id).is_ok()
     }
 
     fn reply(&mut self, call: &PausedCall, reply: Reply) -> Result<()> {
-        let none = ScmpNotifRespFlags::empty();
-        let resp = match reply {
-            Reply::Continue => ScmpNotifResp::new_continue(call.id, none),
-            Reply::Return(value) => ScmpNotifResp::new_val(call.id, value, none),
-            // The kernel wants errors as negative numbers, like a raw system call returns them.
-            Reply::Fail(errno) => ScmpNotifResp::new_error(call.id, -errno, none),
+        let (val, error, flags) = match reply {
+            // Let the kernel run the real call.
+            Reply::Continue => (0, 0, libc::SECCOMP_USER_NOTIF_FLAG_CONTINUE as u32),
+            Reply::Return(value) => (value, 0, 0),
+            // Errors go back as negative numbers, like a raw system call returns them.
+            Reply::Fail(errno) => (0, -errno, 0),
         };
-        resp.respond(self.listener.as_raw_fd())?;
+        let mut resp = libc::seccomp_notif_resp {
+            id: call.id,
+            val,
+            error,
+            flags,
+        };
+        self.ioctl(libc::SECCOMP_IOCTL_NOTIF_SEND, &mut resp)?;
         Ok(())
     }
 }
