@@ -117,8 +117,8 @@ fn describe(call: &PausedCall, s: &Session) -> String {
 
 /// `None` means the process is gone, so there's no one to answer.
 fn decide(watcher: &dyn Watcher, call: &PausedCall, s: &mut Session) -> Option<Reply> {
-    // Between commands nothing is saved.
-    if !s.is_running() {
+    // Which command (or background job) is this? At the prompt, nothing is saved.
+    if s.choose_target(call.pid).is_none() {
         return Some(Reply::Continue);
     }
     let Some(file_call) = calls::decode(&call.name, &call.args) else {

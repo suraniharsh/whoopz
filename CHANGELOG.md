@@ -22,6 +22,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is no longer counted as part of your command.
 - Whoopz is now one static file that runs on any Linux 5.5+ distribution (x86_64 and ARM64),
   with nothing to install: it no longer needs libseccomp. It also watches 32-bit programs.
+- Background jobs get their own `[background]` entry in `whoops list` instead of being mixed
+  into whatever command is running. Plain `whoops` leaves them alone; `whoops <n>` undoes one.
+  Their changes after the prompt is back are now saved too.
 - Clear errors on systems where Whoopz can't work (old kernel, seccomp blocked by a sandbox,
   `ptrace_scope` 2 or 3).
 - `WHOOPZ_DEBUG=1` (or a file path) shows every paused call and where its process sits in the

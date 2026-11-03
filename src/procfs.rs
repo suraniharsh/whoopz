@@ -116,6 +116,8 @@ pub struct ProcInfo {
     pub sid: i32,
     /// The process group the terminal currently sends keyboard input and Ctrl-C to.
     pub tpgid: i32,
+    /// When the process started, in clock ticks since boot.
+    pub start_time: u64,
 }
 
 pub fn info(pid: u32) -> io::Result<ProcInfo> {
@@ -137,6 +139,10 @@ pub fn info(pid: u32) -> io::Result<ProcInfo> {
         pgid: num(2)?,
         sid: num(3)?,
         tpgid: num(5)?,
+        start_time: fields
+            .get(19)
+            .and_then(|f| f.parse().ok())
+            .ok_or_else(bad)?,
     })
 }
 

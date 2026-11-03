@@ -458,7 +458,13 @@ impl Terminal {
     /// echoes back, can't be mistaken for it. `printf` works the same in every shell.
     fn run(&mut self, line: &str, n: u32) {
         let marker = format!("DONE{n}");
-        writeln!(self.input, "{line}; printf '%s%s\\n' DONE {n}").unwrap();
+        // `cmd &; next` is a syntax error; `&` already separates commands.
+        let sep = if line.trim_end().ends_with('&') {
+            " "
+        } else {
+            "; "
+        };
+        writeln!(self.input, "{line}{sep}printf '%s%s\\n' DONE {n}").unwrap();
         let start = Instant::now();
         while !self.output.lock().unwrap().contains(&marker) {
             assert!(
@@ -598,6 +604,39 @@ fn interactive_fish_redirect_is_undone() {
     term.run("whoops", 3);
     let out = term.finish();
     assert_eq!(s.read("notes"), "old\n", "{out}");
+}
+
+/// A background job's changes get their own entry. They never get mixed into the command
+/// that happens to be running, and plain `whoops` leaves them alone.
+fn background_jobs_get_their_own_entry(shell: &str) {
+    let s = Sandbox::new();
+    s.write("a", "a");
+
+    let mut term = Terminal::start(&s, shell);
+    term.run("sh -c 'sleep 1; echo bg > bgfile' &", 2);
+    term.run("rm a", 3);
+    term.run("sleep 2", 4); // the background job writes its file during this command
+    term.run("whoops", 5); // must undo `rm a`
+    term.run("whoops list", 6);
+    let out = term.finish();
+    assert!(s.exists("a"), "`rm a` should be undone:\n{out}");
+    assert!(
+        s.exists("bgfile"),
+        "the background job's file must stay:\n{out}"
+    );
+    assert!(out.contains("[background]"), "{out}");
+}
+
+#[test]
+fn bash_background_jobs_get_their_own_entry() {
+    background_jobs_get_their_own_entry("/bin/bash");
+}
+
+#[test]
+fn fish_background_jobs_get_their_own_entry() {
+    if let Some(fish) = installed("fish") {
+        background_jobs_get_their_own_entry(&fish);
+    }
 }
 
 /// The shell saving its own history isn't part of your command.

@@ -17,8 +17,15 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Line {
-    /// A command started. Only written once the command changes something.
-    Command { id: u64, text: String, time: u64 },
+    /// A command started (or a background job made its first change). Only written once it
+    /// changes something.
+    Command {
+        id: u64,
+        text: String,
+        time: u64,
+        #[serde(default)]
+        background: bool,
+    },
     /// Something a command changed.
     Change { cmd: u64, change: Change },
     /// A command was undone.

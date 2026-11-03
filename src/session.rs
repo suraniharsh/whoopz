@@ -12,12 +12,20 @@
 //! before each command line and "end" when the prompt comes back. Changes made between
 //! commands (by prompt tools, or the shell saving its history) are let through without saving.
 //!
+//! Every paused call is assigned to an **entry** before anything is saved:
+//! - the command line running now, if the call comes from the shell itself or from the
+//!   terminal's **foreground** process group (the command you're waiting on), or
+//! - its own `[background]` entry, if it comes from a background job (`make &`, a file
+//!   watcher, fish generating completions on its first start). Those are still saved and can
+//!   be undone with `whoops <n>`, but never get mixed into your commands, and plain `whoops`
+//!   leaves them alone.
+//!
 //! A hook can also send "ignore <path>": files whose path starts with it are the shell's own
 //! housekeeping (its history file, for example). fish rewrites its history from a background
 //! thread at any moment, even in the middle of your command. Changes there are let through
 //! too, but only when the shell itself makes them: `rm` on your history file is still saved.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Read};
@@ -28,6 +36,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 
 use crate::journal::{self, Change, Line};
+use crate::procfs;
 use crate::sys::{self, Dir};
 
 /// Files bigger than this are not copied (hard links have no limit).
@@ -36,18 +45,26 @@ pub const MAX_COPY: u64 = 512 * 1024 * 1024;
 /// Finished sessions are removed after this long.
 const KEEP_FOR: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-enum State {
-    /// Between commands: nothing is saved.
-    Idle,
-    Running {
-        id: u64,
-        text: String,
-        /// The command line goes in the journal only once the command changes something.
-        written: bool,
-        /// Paths whose original state this command already saved. A program that rewrites
-        /// the same file a hundred times only needs the first version kept.
-        seen: HashSet<PathBuf>,
-    },
+/// One undo entry: a command line, or a background job.
+struct Entry {
+    text: String,
+    background: bool,
+    /// The entry goes in the journal only once it changes something.
+    written: bool,
+    /// Paths whose original state this entry already saved. A program that rewrites the same
+    /// file a hundred times only needs the first version kept.
+    seen: HashSet<PathBuf>,
+}
+
+impl Entry {
+    fn new(text: String, background: bool) -> Self {
+        Self {
+            text,
+            background,
+            written: false,
+            seen: HashSet::new(),
+        }
+    }
 }
 
 pub struct Session {
@@ -58,7 +75,14 @@ pub struct Session {
     marks: Option<Marks>,
     next_cmd: u64,
     next_stash: u64,
-    state: State,
+    entries: HashMap<u64, Entry>,
+    /// The command line running now; `None` at the prompt.
+    current: Option<u64>,
+    /// Background process groups, the entry each one's changes go to, and the start time of
+    /// the group's leader (a process group id is reused once the group is gone).
+    background: HashMap<i32, (u64, Option<u64>)>,
+    /// The entry the call being handled belongs to.
+    target: Option<u64>,
     /// The shell process, and path prefixes it keeps its own files under.
     shell_pid: Option<u32>,
     housekeeping: Vec<Vec<u8>>,
@@ -106,7 +130,10 @@ impl Session {
             marks: None,
             next_cmd: 1,
             next_stash: 1,
-            state: State::Idle,
+            entries: HashMap::new(),
+            current: None,
+            background: HashMap::new(),
+            target: None,
             shell_pid: None,
             housekeeping: Vec::new(),
         })
@@ -136,38 +163,80 @@ impl Session {
     // --- which command is running ---
 
     pub fn start_command(&mut self, text: String) {
-        let id = self.next_cmd;
-        self.next_cmd += 1;
-        self.state = State::Running {
-            id,
-            text,
-            written: false,
-            seen: HashSet::new(),
-        };
+        self.end_command();
+        let id = self.new_entry(Entry::new(text, false));
+        self.current = Some(id);
     }
 
     pub fn end_command(&mut self) {
-        self.state = State::Idle;
+        // A finished command gets no more changes: anything it left running in the background
+        // goes to its own entry.
+        if let Some(id) = self.current.take() {
+            self.entries.remove(&id);
+        }
+    }
+
+    fn new_entry(&mut self, entry: Entry) -> u64 {
+        let id = self.next_cmd;
+        self.next_cmd += 1;
+        self.entries.insert(id, entry);
+        id
     }
 
     /// The running command's text, if a hook said one is running.
     pub fn current_text(&self) -> Option<&str> {
-        match &self.state {
-            State::Running { text, .. } => Some(text),
-            State::Idle => None,
+        self.current
+            .and_then(|id| self.entries.get(&id))
+            .map(|e| e.text.as_str())
+    }
+
+    /// Decide which entry a call from `pid` belongs to; `None` means don't save it. The answer
+    /// is used by [`Session::first_time`] and [`Session::record`] until the next call.
+    pub fn choose_target(&mut self, pid: u32) -> Option<u64> {
+        self.target = self.target_for(pid);
+        self.target
+    }
+
+    fn target_for(&mut self, pid: u32) -> Option<u64> {
+        let Some(shell) = self.shell_pid else {
+            return self.current;
+        };
+        if is_thread_of(shell, pid) {
+            return self.current;
         }
+        let (Ok(proc_info), Ok(shell_info)) = (procfs::info(pid), procfs::info(shell)) else {
+            return self.current;
+        };
+        // The shell's own group (prompt tools, fish functions, shells without job control),
+        // and the foreground group (the command you're waiting on): the current command.
+        if proc_info.pgid == shell_info.pgid || proc_info.pgid == proc_info.tpgid {
+            return self.current;
+        }
+        Some(self.background_entry(proc_info.pgid, pid))
     }
 
-    pub fn is_running(&self) -> bool {
-        matches!(self.state, State::Running { .. })
+    /// The entry for a background process group, made the first time the group changes
+    /// something.
+    fn background_entry(&mut self, pgid: i32, pid: u32) -> u64 {
+        let leader_start = procfs::info(pgid as u32).ok().map(|i| i.start_time);
+        if let Some(&(id, start)) = self.background.get(&pgid)
+            && (leader_start.is_none() || leader_start == start)
+        {
+            return id;
+        }
+        let mut text = procfs::cmdline(pgid as u32);
+        if text.is_empty() {
+            text = procfs::cmdline(pid);
+        }
+        let id = self.new_entry(Entry::new(text, true));
+        self.background.insert(pgid, (id, leader_start));
+        id
     }
 
-    /// True the first time this command touches `path`.
+    /// True the first time the target entry touches `path`.
     pub fn first_time(&mut self, path: &Path) -> bool {
-        match &mut self.state {
-            State::Running { seen, .. } => seen.insert(path.to_path_buf()),
-            State::Idle => false,
-        }
+        let target = self.target.and_then(|id| self.entries.get_mut(&id));
+        target.is_some_and(|e| e.seen.insert(path.to_path_buf()))
     }
 
     pub fn set_shell_pid(&mut self, pid: u32) {
@@ -180,9 +249,7 @@ impl Session {
         let Some(shell) = self.shell_pid else {
             return false;
         };
-        // A thread of the shell shows up as /proc/<shell>/task/<thread id>.
-        let from_shell = pid == shell || Path::new(&format!("/proc/{shell}/task/{pid}")).exists();
-        from_shell
+        is_thread_of(shell, pid)
             && !paths.is_empty()
             && paths.iter().all(|path| {
                 let bytes = path.as_os_str().as_bytes();
@@ -213,26 +280,26 @@ impl Session {
 
     // --- the journal ---
 
-    /// Record a change made by the running command.
+    /// Record a change made by the target entry.
     pub fn record(&mut self, change: Change) -> io::Result<()> {
-        let State::Running {
-            id, text, written, ..
-        } = &mut self.state
-        else {
+        let Some(cmd) = self.target else {
             return Ok(());
         };
-        let cmd = *id;
-        if !*written {
+        let Some(entry) = self.entries.get_mut(&cmd) else {
+            return Ok(());
+        };
+        if !entry.written {
             let time = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs());
             let line = Line::Command {
                 id: cmd,
-                text: text.clone(),
+                text: entry.text.clone(),
                 time,
+                background: entry.background,
             };
             journal::append(&mut self.journal, &line)?;
-            *written = true;
+            entry.written = true;
         }
         journal::append(&mut self.journal, &Line::Change { cmd, change })
     }
@@ -263,6 +330,12 @@ impl Session {
     pub fn discard_stash(&self, name: &str) {
         let _ = fs::remove_file(self.stash_path(name));
     }
+}
+
+/// Is `pid` the process `shell` or one of its threads? A thread shows up as
+/// `/proc/<shell>/task/<thread id>`.
+fn is_thread_of(shell: u32, pid: u32) -> bool {
+    pid == shell || Path::new(&format!("/proc/{shell}/task/{pid}")).exists()
 }
 
 /// Remove sessions that ended more than [`KEEP_FOR`] ago.

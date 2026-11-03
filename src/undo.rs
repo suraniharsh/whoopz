@@ -26,6 +26,7 @@ pub struct Response {
 struct Command {
     id: u64,
     text: String,
+    background: bool,
     changes: Vec<Change>,
     undone: bool,
 }
@@ -37,9 +38,15 @@ fn commands(s: &Session) -> io::Result<Vec<Command>> {
     let mut cmds: Vec<Command> = Vec::new();
     for line in journal::read(&s.journal_path())? {
         match line {
-            Line::Command { id, text, .. } => cmds.push(Command {
+            Line::Command {
                 id,
                 text,
+                background,
+                ..
+            } => cmds.push(Command {
+                id,
+                text,
+                background,
                 changes: Vec::new(),
                 undone: false,
             }),
@@ -72,10 +79,15 @@ pub fn list(s: &Session) -> Response {
     let mut text = String::new();
     for c in &cmds {
         let mark = if c.undone { "  (undone)" } else { "" };
+        let label = if c.background {
+            format!("[background] {}", c.text)
+        } else {
+            c.text.clone()
+        };
         text += &format!(
             "{:>4}  {:<40}  {}{mark}\n",
             c.id,
-            shorten(&c.text, 40),
+            shorten(&label, 40),
             summary(&c.changes)
         );
     }
@@ -97,7 +109,8 @@ pub fn undo(s: &mut Session, which: Option<u64>) -> Response {
                 ));
             }
         },
-        None => match cmds.iter().rev().find(|c| !c.undone) {
+        // Plain `whoops` undoes your last command, never a background job.
+        None => match cmds.iter().rev().find(|c| !c.undone && !c.background) {
             Some(c) => c,
             None => return failed("Nothing to undo.".into()),
         },

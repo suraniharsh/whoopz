@@ -98,6 +98,10 @@ if status is-interactive; and not set -q WHOOPZ_ACTIVE; and command -q whoops
 end
 ```
 
+Background jobs (`make &`, a file watcher) get their own `[background]` entry in
+`whoops list`, so they never get mixed into the command you're running. Plain `whoops` leaves
+them alone; undo one with `whoops <n>`.
+
 Set `WHOOPZ_DEBUG=1` before `whoops shell` to see every call Whoopz pauses.
 
 ## What it can't undo
@@ -107,7 +111,6 @@ Set `WHOOPZ_DEBUG=1` before `whoops shell` to see every call Whoopz pauses.
 - `sudo` commands: `sudo` gives an error inside a Whoopz shell
 - Files over 512 MB on a different drive from `~/.local/share` (a hard link can't cross
   drives, and a copy that big is skipped, with a warning)
-- Changes a background job makes after the prompt is back
 - Commands from an earlier `whoops shell` session: undo works within the session it happened in
 - A shell started inside the watched shell (`bash`, `zsh`): everything in it counts as one command
 
