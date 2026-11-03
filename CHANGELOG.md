@@ -7,6 +7,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-04
+
 ### Security
 
 - Whoopz no longer performs deletes and renames for a program. It did so with your full
@@ -46,5 +48,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sandbox, or `ptrace_scope` 2 or 3.
 - `WHOOPZ_DEBUG=1` (or a file path) shows every call Whoopz pauses.
 
-[Unreleased]: https://github.com/suraniharsh/whoopz/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/suraniharsh/whoopz/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/suraniharsh/whoopz/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/suraniharsh/whoopz/releases/tag/v0.1.0
