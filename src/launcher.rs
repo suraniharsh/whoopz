@@ -21,6 +21,7 @@ use std::io::{self, IoSlice, IoSliceMut};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixListener;
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
@@ -46,12 +47,50 @@ const ACTIVE_VAR: &str = "WHOOPZ_ACTIVE";
 /// Set to 1 to print every paused call and the answer it got, or to a path to write it there.
 const DEBUG_VAR: &str = "WHOOPZ_DEBUG";
 
+/// Shells `whoops shell` recognises when it's typed in one.
+const KNOWN_SHELLS: &[&str] = &[
+    "bash", "zsh", "fish", "nu", "elvish", "tcsh", "csh", "dash", "ksh", "mksh", "yash", "sh",
+];
+
+/// Which shell to start: `--shell` if given, else the shell `whoops shell` was typed in, else
+/// `$SHELL`. Your login shell (`$SHELL`) isn't always the one you use: a terminal can be set to
+/// start fish while `$SHELL` still says bash.
+fn choose_shell(flag: Option<&str>) -> Result<PathBuf> {
+    if let Some(name) = flag {
+        return find_program(name).with_context(|| format!("couldn't find the shell {name}"));
+    }
+    let parent = std::fs::read_link(format!("/proc/{}/exe", std::os::unix::process::parent_id()));
+    if let Ok(exe) = parent
+        && exe
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| KNOWN_SHELLS.contains(&n))
+    {
+        return Ok(exe);
+    }
+    Ok(std::env::var_os("SHELL")
+        .filter(|s| !s.is_empty())
+        .map_or_else(|| PathBuf::from("/bin/sh"), PathBuf::from))
+}
+
+/// A path as given, or a name looked up in `$PATH`.
+fn find_program(name: &str) -> Option<PathBuf> {
+    if name.contains('/') {
+        return Some(PathBuf::from(name));
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
 /// Start the shell under the watcher and return its exit code once it ends.
-pub fn run_shell(args: &[String]) -> Result<i32> {
+pub fn run_shell(shell_flag: Option<&str>, args: &[String]) -> Result<i32> {
     if std::env::var_os(ACTIVE_VAR).is_some() {
         bail!("already inside a whoops shell");
     }
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+    let shell_path = choose_shell(shell_flag)?;
+    let shell = shell_path.display().to_string();
 
     // 1. The session, the hook pipe and the messenger socket.
     let data = session::data_dir()?;
@@ -66,13 +105,14 @@ pub fn run_shell(args: &[String]) -> Result<i32> {
     let control = UnixListener::bind(&sock_path)
         .with_context(|| format!("couldn't create the socket {}", sock_path.display()))?;
 
-    let mut cmd = Command::new(&shell);
-    cmd.env(ACTIVE_VAR, "1")
+    let mut cmd = Command::new(&shell_path);
+    cmd.env("SHELL", &shell_path)
+        .env(ACTIVE_VAR, "1")
         .env(SOCK_VAR, &sock_path)
         .env("WHOOPZ_MARK_FD", MARK_FD.to_string());
 
     if args.is_empty() {
-        let kind = hooks::detect(shell.as_ref());
+        let kind = hooks::detect(&shell_path);
         if !hooks::install(&kind, &session.dir, &mut cmd)? {
             eprintln!(
                 "whoops: no command hook for {shell}, so the whole session counts as one command"
@@ -112,6 +152,7 @@ pub fn run_shell(args: &[String]) -> Result<i32> {
         .spawn()
         .with_context(|| format!("could not start {shell}"))?;
     let shell_pid = Pid::from_raw(child.id() as i32);
+    session.set_shell_pid(child.id());
 
     // Close our copies of the child's ends. If the child dies before sending the listener, its
     // copy closes too, and `receive_listener` gets "end of file" instead of waiting forever.

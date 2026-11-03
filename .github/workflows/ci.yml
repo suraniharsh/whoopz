@@ -24,7 +24,7 @@ jobs:
       - name: system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libseccomp-dev pkg-config zsh
+          sudo apt-get install -y --no-install-recommends libseccomp-dev pkg-config zsh fish
 
       # Keep in step with rust-toolchain.toml.
       - uses: dtolnay/rust-toolchain@master

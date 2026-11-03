@@ -3,10 +3,13 @@
 //! The kernel only shows the watcher processes and calls, not command lines. So the shell
 //! tells it: before running a command line it sends `start <the line>`, and when the prompt
 //! comes back it sends `end`. Messages go down a pipe the shell inherits as fd [`MARK_FD`].
+//! At startup it can also send `ignore <path>` for files the shell keeps for itself (its
+//! history file): when the shell itself changes those, it isn't part of your command.
 //!
 //! The hook is installed without touching your own config files:
 //! - **bash** starts with `--rcfile <session>/bashrc`, which loads `~/.bashrc` first.
 //! - **zsh** starts with `ZDOTDIR=<session>/zdotdir`, whose files load your own ones first.
+//! - **fish** starts with `-C 'source <session>/hook.fish'`, which runs after your own config.
 
 use std::fs;
 use std::io;
@@ -19,6 +22,7 @@ pub const MARK_FD: i32 = 197;
 pub enum Shell {
     Bash,
     Zsh,
+    Fish,
     Other,
 }
 
@@ -26,6 +30,7 @@ pub fn detect(shell: &Path) -> Shell {
     match shell.file_name().and_then(|n| n.to_str()) {
         Some(name) if name.starts_with("bash") => Shell::Bash,
         Some(name) if name.starts_with("zsh") => Shell::Zsh,
+        Some(name) if name.starts_with("fish") => Shell::Fish,
         _ => Shell::Other,
     }
 }
@@ -57,6 +62,13 @@ pub fn install(shell: &Shell, session_dir: &Path, cmd: &mut Command) -> io::Resu
             cmd.env("ZDOTDIR", &dir).arg("-i");
             Ok(true)
         }
+        Shell::Fish => {
+            let hook = session_dir.join("hook.fish");
+            fs::write(&hook, FISH_HOOK)?;
+            cmd.env("WHOOPZ_FISH_HOOK", &hook)
+                .args(["-i", "-C", "source \"$WHOOPZ_FISH_HOOK\""]);
+            Ok(true)
+        }
         Shell::Other => Ok(false),
     }
 }
@@ -70,6 +82,9 @@ if [[ -f ~/.bashrc ]]; then source ~/.bashrc; fi
 __whoopz_send() { builtin printf '%s\0' "$1" >&"$WHOOPZ_MARK_FD"; }
 __whoopz_start() { __whoopz_send "start $1"; }
 __whoopz_end() { __whoopz_send end; }
+
+# The history file is bash's own; bash writing it isn't part of your command.
+__whoopz_send "ignore ${HISTFILE:-$HOME/.bash_history}"
 
 # Bash saves its history file while exiting. That isn't part of the `exit` command.
 if [[ -z $(trap -p EXIT) ]]; then trap '__whoopz_end' EXIT; fi
@@ -132,10 +147,41 @@ unset WHOOPZ_USER_ZDOTDIR WHOOPZ_ZDOTDIR_UNSET
 __whoopz_send() { print -rn -- "$1"$'\0' >&$WHOOPZ_MARK_FD }
 __whoopz_start() { __whoopz_send "start $1" }
 __whoopz_end() { __whoopz_send end }
+# The history file is zsh's own; zsh writing it isn't part of your command.
+[[ -n $HISTFILE ]] && __whoopz_send "ignore $HISTFILE"
 autoload -Uz add-zsh-hook
 add-zsh-hook preexec __whoopz_start
 # zsh saves its history file while exiting. That isn't part of the `exit` command.
 add-zsh-hook zshexit __whoopz_end
 # First in line, so files your other prompt hooks write don't count as the last command's.
 precmd_functions=(__whoopz_end $precmd_functions)
+"#;
+
+const FISH_HOOK: &str = r#"# Written by `whoops shell`: the Whoopz hook for fish. Your own config has already run.
+# fish runs one event before each command line and one after it.
+
+function __whoopz_send
+    printf '%s\0' $argv[1] >&$WHOOPZ_MARK_FD
+end
+
+# fish keeps its history and universal variables here, and rewrites them from a background
+# thread at any moment, even in the middle of your command. When fish itself changes them,
+# that isn't part of your command.
+set -l __whoopz_data (set -q XDG_DATA_HOME; and echo $XDG_DATA_HOME; or echo ~/.local/share)
+set -l __whoopz_config (set -q XDG_CONFIG_HOME; and echo $XDG_CONFIG_HOME; or echo ~/.config)
+__whoopz_send "ignore $__whoopz_data/fish/"
+__whoopz_send "ignore $__whoopz_config/fish/fish_variables"
+
+function __whoopz_preexec --on-event fish_preexec
+    __whoopz_send "start $argv[1]"
+end
+
+function __whoopz_postexec --on-event fish_postexec
+    __whoopz_send end
+end
+
+# fish saves its history while exiting. That isn't part of the `exit` command.
+function __whoopz_exit --on-event fish_exit
+    __whoopz_send end
+end
 "#;

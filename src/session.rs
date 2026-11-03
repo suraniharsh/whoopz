@@ -11,6 +11,11 @@
 //! The session also tracks which command is running. The shell hook sends "start <text>"
 //! before each command line and "end" when the prompt comes back. Changes made between
 //! commands (by prompt tools, or the shell saving its history) are let through without saving.
+//!
+//! A hook can also send "ignore <path>": files whose path starts with it are the shell's own
+//! housekeeping (its history file, for example). fish rewrites its history from a background
+//! thread at any moment, even in the middle of your command. Changes there are let through
+//! too, but only when the shell itself makes them: `rm` on your history file is still saved.
 
 use std::collections::HashSet;
 use std::ffi::CString;
@@ -54,6 +59,9 @@ pub struct Session {
     next_cmd: u64,
     next_stash: u64,
     state: State,
+    /// The shell process, and path prefixes it keeps its own files under.
+    shell_pid: Option<u32>,
+    housekeeping: Vec<Vec<u8>>,
 }
 
 /// `$XDG_DATA_HOME/whoopz`, or `~/.local/share/whoopz`.
@@ -99,6 +107,8 @@ impl Session {
             next_cmd: 1,
             next_stash: 1,
             state: State::Idle,
+            shell_pid: None,
+            housekeeping: Vec::new(),
         })
     }
 
@@ -160,6 +170,28 @@ impl Session {
         }
     }
 
+    pub fn set_shell_pid(&mut self, pid: u32) {
+        self.shell_pid = Some(pid);
+    }
+
+    /// Is this the shell itself (any of its threads) changing one of its own files?
+    pub fn is_housekeeping(&self, pid: u32, paths: &[&Path]) -> bool {
+        use std::os::unix::ffi::OsStrExt;
+        let Some(shell) = self.shell_pid else {
+            return false;
+        };
+        // A thread of the shell shows up as /proc/<shell>/task/<thread id>.
+        let from_shell = pid == shell || Path::new(&format!("/proc/{shell}/task/{pid}")).exists();
+        from_shell
+            && !paths.is_empty()
+            && paths.iter().all(|path| {
+                let bytes = path.as_os_str().as_bytes();
+                self.housekeeping
+                    .iter()
+                    .any(|prefix| bytes.starts_with(prefix))
+            })
+    }
+
     pub fn set_marks(&mut self, marks: Marks) {
         self.marks = Some(marks);
     }
@@ -174,6 +206,7 @@ impl Session {
             match mark {
                 Mark::Start(text) => self.start_command(text),
                 Mark::End => self.end_command(),
+                Mark::Ignore(prefix) => self.housekeeping.push(prefix),
             }
         }
     }
@@ -256,6 +289,8 @@ pub fn clean_old(data: &Path) {
 pub enum Mark {
     Start(String),
     End,
+    /// The shell keeps its own files under this path.
+    Ignore(Vec<u8>),
 }
 
 /// The reading end of the pipe the shell hook writes to. Messages end with a zero byte:
@@ -288,6 +323,12 @@ impl Marks {
         let mut marks = Vec::new();
         while let Some(end) = self.partial.iter().position(|&b| b == 0) {
             let msg: Vec<u8> = self.partial.drain(..=end).collect();
+            if let Some(prefix) = msg[..end].strip_prefix(b"ignore ") {
+                if !prefix.is_empty() {
+                    marks.push(Mark::Ignore(prefix.to_vec()));
+                }
+                continue;
+            }
             let msg = String::from_utf8_lossy(&msg[..end]);
             if msg == "end" {
                 marks.push(Mark::End);

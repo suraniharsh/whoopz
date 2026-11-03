@@ -57,6 +57,18 @@ pub enum Prepared {
 }
 
 impl Prepared {
+    /// The paths this call is about.
+    pub fn paths(&self) -> Vec<&Path> {
+        match self {
+            Prepared::Remove { at, .. }
+            | Prepared::Open { at, .. }
+            | Prepared::Truncate { at, .. }
+            | Prepared::Create { at, .. } => vec![&at.path],
+            Prepared::Rename { from, to, .. } => vec![&from.path, &to.path],
+            Prepared::Ftruncate { path, .. } => vec![path],
+        }
+    }
+
     /// The paths this call is about, for debug output.
     pub fn describe(&self) -> String {
         match self {

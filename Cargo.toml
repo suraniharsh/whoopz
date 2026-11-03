@@ -24,5 +24,6 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 
 [dev-dependencies]
+libc = "0.2.191"
 nix = { version = "0.31.3", features = ["term"] }
 tempfile = "3.27.0"

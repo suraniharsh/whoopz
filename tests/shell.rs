@@ -396,31 +396,51 @@ impl Terminal {
     fn start(s: &Sandbox, shell: &str) -> Self {
         let pty = nix::pty::openpty(None, None).unwrap();
         let slave = fs::File::from(pty.slave);
-        let child = s
-            .command(shell)
-            .arg("shell")
+        let mut cmd = s.command(shell);
+        cmd.arg("shell")
             .env("TERM", "xterm-256color")
             .stdin(Stdio::from(slave.try_clone().unwrap()))
             .stdout(Stdio::from(slave.try_clone().unwrap()))
-            .stderr(Stdio::from(slave))
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::from(slave));
+        // Like a real terminal: the shell gets its own session, with the fake terminal as its
+        // controlling terminal. Without one, job control fails, and fish waits forever.
+        // SAFETY: only async-signal-safe calls between fork and exec.
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(|| {
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = cmd.spawn().unwrap();
 
         let master = fs::File::from(pty.master);
         let output = Arc::new(Mutex::new(String::new()));
         {
             let output = output.clone();
             let mut reader = master.try_clone().unwrap();
+            let mut answer = master.try_clone().unwrap();
             std::thread::spawn(move || {
                 let mut buf = [0u8; 4096];
                 while let Ok(n) = reader.read(&mut buf) {
                     if n == 0 {
                         break;
                     }
+                    let chunk = &buf[..n];
+                    // Answer like a real terminal: fish 4 waits for "what terminal are you?"
+                    // before its first prompt, and some line editors ask where the cursor is.
+                    if contains(chunk, b"\x1b[0c") || contains(chunk, b"\x1b[c") {
+                        let _ = answer.write_all(b"\x1b[?62;22c");
+                    }
+                    if contains(chunk, b"\x1b[6n") {
+                        let _ = answer.write_all(b"\x1b[1;1R");
+                    }
                     output
                         .lock()
                         .unwrap()
-                        .push_str(&String::from_utf8_lossy(&buf[..n]));
+                        .push_str(&String::from_utf8_lossy(chunk));
                 }
             });
         }
@@ -434,10 +454,11 @@ impl Terminal {
     }
 
     /// Type a command line, then wait until it has finished. Each line ends by printing a
-    /// number computed by the shell, so the typed text (echoed back) can't be mistaken for it.
+    /// marker the shell glues together (`DONE` + n), so the typed text, which the terminal
+    /// echoes back, can't be mistaken for it. `printf` works the same in every shell.
     fn run(&mut self, line: &str, n: u32) {
-        let marker = (900_000 + n).to_string();
-        writeln!(self.input, "{line}; echo $((900000 + {n}))").unwrap();
+        let marker = format!("DONE{n}");
+        writeln!(self.input, "{line}; printf '%s%s\\n' DONE {n}").unwrap();
         let start = Instant::now();
         while !self.output.lock().unwrap().contains(&marker) {
             assert!(
@@ -454,11 +475,11 @@ impl Terminal {
     /// Paste several lines at once, the way a terminal does it (bracketed paste). Bash then
     /// runs them back to back without showing a prompt in between.
     fn paste(&mut self, lines: &[&str], n: u32) {
-        let marker = (900_000 + n).to_string();
+        let marker = format!("DONE{n}");
         let text = lines.join("\n");
         write!(
             self.input,
-            "\x1b[200~{text}\necho $((900000 + {n}))\x1b[201~\n"
+            "\x1b[200~{text}\nprintf '%s%s\\n' DONE {n}\x1b[201~\n"
         )
         .unwrap();
         let start = Instant::now();
@@ -478,6 +499,22 @@ impl Terminal {
         let _ = self.child.wait();
         self.output.lock().unwrap().clone()
     }
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// The path of a shell, or `None` if it isn't installed (the test is then skipped).
+fn installed(name: &str) -> Option<String> {
+    let found = ["/usr/bin", "/bin"]
+        .iter()
+        .map(|dir| format!("{dir}/{name}"))
+        .find(|p| Path::new(p).exists());
+    if found.is_none() {
+        eprintln!("{name} isn't installed; skipping");
+    }
+    found
 }
 
 fn interactive_undo_is_per_command_line(shell: &str) {
@@ -534,12 +571,70 @@ fn interactive_bash_one_line_with_semicolons_is_one_command() {
 
 #[test]
 fn interactive_zsh_undo_is_per_command_line() {
-    let Some(zsh) = ["/usr/bin/zsh", "/bin/zsh"]
-        .into_iter()
-        .find(|p| Path::new(p).exists())
-    else {
-        eprintln!("zsh isn't installed; skipping");
+    if let Some(zsh) = installed("zsh") {
+        interactive_undo_is_per_command_line(&zsh);
+    }
+}
+
+#[test]
+fn interactive_fish_undo_is_per_command_line() {
+    if let Some(fish) = installed("fish") {
+        interactive_undo_is_per_command_line(&fish);
+    }
+}
+
+#[test]
+fn interactive_fish_redirect_is_undone() {
+    // fish opens `> file` itself, in the shell process, so only the hook can tell which
+    // command it belongs to.
+    let Some(fish) = installed("fish") else {
         return;
     };
-    interactive_undo_is_per_command_line(zsh);
+    let s = Sandbox::new();
+    s.write("notes", "old\n");
+
+    let mut term = Terminal::start(&s, &fish);
+    term.run("echo new > notes", 2);
+    term.run("whoops", 3);
+    let out = term.finish();
+    assert_eq!(s.read("notes"), "old\n", "{out}");
+}
+
+/// The shell saving its own history isn't part of your command.
+fn history_is_not_recorded(shell: &str, save_history: &str) {
+    let s = Sandbox::new();
+    let mut term = Terminal::start(&s, shell);
+    term.run("true", 2);
+    term.run(save_history, 3);
+    term.run("whoops list", 4);
+    let out = term.finish();
+    assert!(out.contains("Nothing to undo yet."), "{out}");
+}
+
+#[test]
+fn bash_history_is_not_recorded() {
+    history_is_not_recorded("/bin/bash", "history -w");
+}
+
+#[test]
+fn fish_history_is_not_recorded() {
+    if let Some(fish) = installed("fish") {
+        history_is_not_recorded(&fish, "builtin history save");
+    }
+}
+
+#[test]
+fn shell_flag_picks_the_shell() {
+    let s = Sandbox::new();
+    let out = s
+        .command("/bin/false")
+        .args(["shell", "--shell", "bash", "--", "-c", "echo $SHELL"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .ends_with("/bash")
+    );
 }

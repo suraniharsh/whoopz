@@ -143,6 +143,10 @@ fn decide(watcher: &dyn Watcher, call: &PausedCall, s: &mut Session) -> Option<R
     if !watcher.is_valid(call) {
         return None;
     }
+    // The shell saving its own history (or similar) isn't part of your command.
+    if s.is_housekeeping(call.pid, &prepared.paths()) {
+        return Some(Reply::Continue);
+    }
     Some(handle::act(prepared, s))
 }
 

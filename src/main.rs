@@ -51,6 +51,11 @@ struct Cli {
 enum Command {
     /// Start your shell with Whoopz watching it
     Shell {
+        /// Which shell to start (a name like `fish`, or a path). Default: the shell you typed
+        /// this in, or else $SHELL
+        #[arg(long)]
+        shell: Option<String>,
+
         /// Arguments for the shell, after `--` (for example: whoops shell -- -c "rm notes.txt")
         #[arg(last = true)]
         args: Vec<String>,
@@ -62,7 +67,7 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let code = match cli.command {
-        Some(Command::Shell { args }) => launcher::run_shell(&args)?,
+        Some(Command::Shell { shell, args }) => launcher::run_shell(shell.as_deref(), &args)?,
         Some(Command::List) => control::request("list")?,
         None => match cli.number {
             Some(n) => control::request(&format!("undo {n}"))?,
