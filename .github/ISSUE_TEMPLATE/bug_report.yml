@@ -1,0 +1,58 @@
+name: Bug report
+description: Something went wrong, or whoops didn't bring a file back
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If Whoopz lost or damaged a file, say so in the title. Those get looked at first.
+        For a security problem, use the Security tab instead of a public issue.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The commands you ran, in order, what you expected, and what happened instead.
+      placeholder: |
+        $ rm -rf build/
+        $ whoops
+        Expected build/ back. Got: ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Whoopz version
+      description: Output of `whoops --version`
+    validations:
+      required: true
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel
+      description: Output of `uname -r`
+    validations:
+      required: true
+  - type: dropdown
+    id: shell
+    attributes:
+      label: Shell
+      options: [bash, zsh, other]
+    validations:
+      required: true
+  - type: input
+    id: filesystem
+    attributes:
+      label: Filesystem
+      description: "Output of `df -T .` in the folder where it happened (ext4, btrfs, xfs, tmpfs, ...)"
+    validations:
+      required: true
+  - type: input
+    id: distro
+    attributes:
+      label: Distribution
+      placeholder: Arch, Ubuntu 24.04, Fedora 41, ...
+  - type: textarea
+    id: logs
+    attributes:
+      label: Output of `whoops list`
+      render: text

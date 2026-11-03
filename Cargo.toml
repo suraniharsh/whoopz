@@ -1,0 +1,17 @@
+[package]
+name = "whoopz"
+version = "0.0.0"
+edition = "2024"
+description = "Always-on undo for the Linux terminal"
+license = "MIT"
+repository = "https://github.com/suraniharsh/whoopz"
+readme = "README.md"
+keywords = ["undo", "terminal", "shell", "seccomp", "linux"]
+categories = ["command-line-utilities"]
+
+# The project is Whoopz; the command you type is `whoops`.
+[[bin]]
+name = "whoops"
+path = "src/main.rs"
+
+[dependencies]
