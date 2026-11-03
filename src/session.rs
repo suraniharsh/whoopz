@@ -27,12 +27,13 @@
 //! thread at any moment, even in the middle of your command. Changes there are let through
 //! too, but only when the shell itself makes them: `rm` on your history file is still saved.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::CString;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -74,7 +75,7 @@ pub struct Session {
     stash_dir: Dir,
     journal: File,
     _lock: File,
-    marks: Option<Marks>,
+    marks: Option<Arc<Marks>>,
     next_cmd: u64,
     next_stash: u64,
     entries: HashMap<u64, Entry>,
@@ -170,22 +171,24 @@ impl Session {
 
     // --- which command is running ---
 
-    pub fn start_command(&mut self, text: String) {
-        self.end_command();
+    /// A command line started. `at`: when the hook said so (clock ticks since boot).
+    pub fn start_command(&mut self, text: String, at: u64) {
+        self.end_command(at);
         let id = self.new_entry(Entry::new(text, false));
         self.current = Some(id);
-        // The window opens at the previous boundary, not now: this "start" may be read a
-        // moment after the command's first process was already born.
-        self.window_start = self.last_boundary;
-        self.last_boundary = procfs::now_ticks();
+        // The window opens at the previous boundary (when the prompt came back), not at this
+        // "start". Some slack covers a message read a moment late on a busy machine.
+        let slack = procfs::ticks_per_second() / 10;
+        self.window_start = self.last_boundary.saturating_sub(slack);
+        self.last_boundary = at;
     }
 
-    pub fn end_command(&mut self) {
+    pub fn end_command(&mut self, at: u64) {
         // A finished command gets no more changes: anything it left running in the background
         // goes to its own entry.
         if let Some(id) = self.current.take() {
             self.entries.remove(&id);
-            self.last_boundary = procfs::now_ticks();
+            self.last_boundary = at;
         }
     }
 
@@ -276,7 +279,7 @@ impl Session {
             })
     }
 
-    pub fn set_marks(&mut self, marks: Marks) {
+    pub fn set_marks(&mut self, marks: Arc<Marks>) {
         self.marks = Some(marks);
     }
 
@@ -285,11 +288,13 @@ impl Session {
     /// Called before handling each paused call. The hook writes "start" before the command
     /// runs, so by the time one of its calls is paused, the message is already in the pipe.
     pub fn apply_marks(&mut self) {
-        let Some(marks) = &mut self.marks else { return };
-        for mark in marks.drain() {
+        let Some(marks) = self.marks.clone() else {
+            return;
+        };
+        for (mark, at) in marks.take() {
             match mark {
-                Mark::Start(text) => self.start_command(text),
-                Mark::End => self.end_command(),
+                Mark::Start(text) => self.start_command(text, at),
+                Mark::End => self.end_command(at),
                 Mark::Ignore(prefix) => self.housekeeping.push(prefix),
             }
         }
@@ -394,49 +399,74 @@ pub enum Mark {
 
 /// The reading end of the pipe the shell hook writes to. Messages end with a zero byte:
 /// `start rm -rf build\0`, `end\0`.
+///
+/// Each message is stamped with the time it was read. A dedicated thread reads as soon as
+/// anything arrives, without waiting for the session lock, so the stamp is close to when the
+/// hook wrote it. The session uses those times to tell a command's own processes from older
+/// ones.
 pub struct Marks {
+    inner: Mutex<MarksInner>,
+}
+
+struct MarksInner {
     pipe: File,
     partial: Vec<u8>,
+    ready: VecDeque<(Mark, u64)>,
 }
 
 impl Marks {
-    /// `pipe` must be non-blocking, so draining stops when it's empty instead of waiting.
+    /// `pipe` must be non-blocking, so reading stops when it's empty instead of waiting.
     pub fn new(pipe: File) -> Self {
         Self {
-            pipe,
-            partial: Vec::new(),
+            inner: Mutex::new(MarksInner {
+                pipe,
+                partial: Vec::new(),
+                ready: VecDeque::new(),
+            }),
         }
     }
 
-    fn drain(&mut self) -> Vec<Mark> {
+    /// Read whatever the hook has written so far, and stamp it.
+    pub fn pull(&self) {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let mut buf = [0u8; 4096];
         loop {
-            match self.pipe.read(&mut buf) {
+            match inner.pipe.read(&mut buf) {
                 Ok(0) => break,
-                Ok(n) => self.partial.extend_from_slice(&buf[..n]),
+                Ok(n) => inner.partial.extend_from_slice(&buf[..n]),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(_) => break, // WouldBlock: nothing more for now
             }
         }
 
-        let mut marks = Vec::new();
-        while let Some(end) = self.partial.iter().position(|&b| b == 0) {
-            let msg: Vec<u8> = self.partial.drain(..=end).collect();
-            if let Some(prefix) = msg[..end].strip_prefix(b"ignore ") {
-                if !prefix.is_empty() {
-                    marks.push(Mark::Ignore(prefix.to_vec()));
-                }
-                continue;
+        let now = procfs::now_ticks();
+        while let Some(end) = inner.partial.iter().position(|&b| b == 0) {
+            let msg: Vec<u8> = inner.partial.drain(..=end).collect();
+            if let Some(mark) = parse(&msg[..end]) {
+                inner.ready.push_back((mark, now));
             }
-            let msg = String::from_utf8_lossy(&msg[..end]);
-            if msg == "end" {
-                marks.push(Mark::End);
-            } else if let Some(text) = msg.strip_prefix("start ") {
-                marks.push(Mark::Start(text.trim().to_string()));
-            }
-            // Anything else isn't from our hook; ignore it.
         }
-        marks
+    }
+
+    /// Everything read so far (reading first, so nothing already written is missed).
+    fn take(&self) -> Vec<(Mark, u64)> {
+        self.pull();
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.ready.drain(..).collect()
+    }
+}
+
+fn parse(msg: &[u8]) -> Option<Mark> {
+    if let Some(prefix) = msg.strip_prefix(b"ignore ") {
+        return (!prefix.is_empty()).then(|| Mark::Ignore(prefix.to_vec()));
+    }
+    let msg = String::from_utf8_lossy(msg);
+    if msg == "end" {
+        Some(Mark::End)
+    } else {
+        // Anything else isn't from our hook; ignore it.
+        msg.strip_prefix("start ")
+            .map(|text| Mark::Start(text.trim().to_string()))
     }
 }
 

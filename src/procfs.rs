@@ -156,19 +156,21 @@ pub fn cmdline(pid: u32) -> String {
         .join(" ")
 }
 
+/// The unit of [`ProcInfo::start_time`] (usually 100 per second).
+pub fn ticks_per_second() -> u64 {
+    // SAFETY: plain call.
+    unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64
+}
+
 /// Now, in the same unit as [`ProcInfo::start_time`]: clock ticks since boot.
 pub fn now_ticks() -> u64 {
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    // SAFETY: plain calls; `ts` is written by the kernel.
-    let (hz, _) = unsafe {
-        (
-            libc::sysconf(libc::_SC_CLK_TCK).max(1) as u64,
-            libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut ts),
-        )
-    };
+    // SAFETY: `ts` is written by the kernel.
+    unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut ts) };
+    let hz = ticks_per_second();
     ts.tv_sec as u64 * hz + ts.tv_nsec as u64 * hz / 1_000_000_000
 }
 

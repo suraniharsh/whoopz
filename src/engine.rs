@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
-use crate::session::{Session, lock};
+use crate::session::{Marks, Session, lock};
 use crate::watcher::{PausedCall, Reply, Watcher};
 use crate::{calls, handle};
 
@@ -150,14 +150,13 @@ fn decide(watcher: &dyn Watcher, call: &PausedCall, s: &mut Session) -> Option<R
     Some(handle::act(prepared, s))
 }
 
-/// Keep reading the hook's messages even when no file-changing call comes along to trigger
-/// it. Otherwise, after enough plain commands like `ls`, the pipe would fill up and the shell
-/// would freeze while writing to it.
+/// Keep reading the hook's messages as soon as they arrive. That stamps them with an accurate
+/// time (see [`Marks`]), and keeps the pipe from filling up after many plain commands like
+/// `ls`, which would freeze the shell while it writes.
 ///
-/// `pipe` is a second handle on the same pipe, used only to wait on. Reading happens under the
-/// session lock, in [`Session::apply_marks`], so messages are applied in order no matter which
-/// thread gets to them first.
-pub fn drain_marks(pipe: OwnedFd, session: Arc<Mutex<Session>>) {
+/// `pipe` is a second handle on the same pipe, used only to wait on. Reading happens in
+/// [`Marks::pull`], so messages stay in order no matter which thread reads them.
+pub fn drain_marks(pipe: OwnedFd, marks: Arc<Marks>, session: Arc<Mutex<Session>>) {
     loop {
         let mut fds = [PollFd::new(pipe.as_fd(), PollFlags::POLLIN)];
         match poll(&mut fds, PollTimeout::NONE) {
@@ -167,6 +166,7 @@ pub fn drain_marks(pipe: OwnedFd, session: Arc<Mutex<Session>>) {
         }
         let events = fds[0].revents().unwrap_or(PollFlags::empty());
         if events.contains(PollFlags::POLLIN) {
+            marks.pull(); // stamp first, without waiting for the session lock
             lock(&session).apply_marks();
         } else if events.contains(PollFlags::POLLHUP) {
             return; // the shell and everything it started have exited

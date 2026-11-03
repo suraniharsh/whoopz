@@ -39,7 +39,7 @@ use crate::control::SOCK_VAR;
 use crate::hooks::{self, MARK_FD};
 use crate::session::{self, Marks, Session};
 use crate::watcher::seccomp::SeccompWatcher;
-use crate::{engine, filter};
+use crate::{engine, filter, procfs};
 
 /// Set inside a watched shell, so `whoops shell` can't be started inside itself.
 const ACTIVE_VAR: &str = "WHOOPZ_ACTIVE";
@@ -100,7 +100,8 @@ pub fn run_shell(shell_flag: Option<&str>, args: &[String]) -> Result<i32> {
 
     let (mark_read, mark_write) = nix::unistd::pipe2(OFlag::O_CLOEXEC | OFlag::O_NONBLOCK)?;
     let mark_poll = mark_read.try_clone()?;
-    session.set_marks(Marks::new(File::from(mark_read)));
+    let marks = Arc::new(Marks::new(File::from(mark_read)));
+    session.set_marks(marks.clone());
 
     let sock_path = session.socket_path()?;
     let control = UnixListener::bind(&sock_path)
@@ -118,12 +119,12 @@ pub fn run_shell(shell_flag: Option<&str>, args: &[String]) -> Result<i32> {
             eprintln!(
                 "whoops: no command hook for {shell}, so the whole session counts as one command"
             );
-            session.start_command(format!("{shell} session"));
+            session.start_command(format!("{shell} session"), procfs::now_ticks());
         }
     } else {
         // `whoops shell -- -c "…"`: no prompt, no hook. The whole run is one command.
         cmd.args(args);
-        session.start_command(args.join(" "));
+        session.start_command(args.join(" "), procfs::now_ticks());
     }
 
     // Orphaned processes (a program that "daemonizes") get handed to us instead of init. They
@@ -173,7 +174,7 @@ pub fn run_shell(shell_flag: Option<&str>, args: &[String]) -> Result<i32> {
     }
     {
         let session = session.clone();
-        std::thread::spawn(move || engine::drain_marks(mark_poll, session));
+        std::thread::spawn(move || engine::drain_marks(mark_poll, marks, session));
     }
     {
         let session = session.clone();

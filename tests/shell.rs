@@ -97,6 +97,16 @@ impl Sandbox {
         out
     }
 
+    /// Everything every session wrote to its journal.
+    fn journals(&self) -> String {
+        let sessions = self.data_dir().join("whoopz/sessions");
+        let mut text = String::new();
+        for entry in fs::read_dir(sessions).into_iter().flatten().flatten() {
+            text += &fs::read_to_string(entry.path().join("journal.jsonl")).unwrap_or_default();
+        }
+        text
+    }
+
     fn command(&self, shell: &str) -> Command {
         let mut cmd = Command::new(BIN);
         let bin_dir = Path::new(BIN).parent().unwrap();
@@ -662,25 +672,28 @@ fn fish_background_jobs_get_their_own_entry() {
 }
 
 /// The shell saving its own history isn't part of your command.
-fn history_is_not_recorded(shell: &str, save_history: &str) {
+fn history_is_not_recorded(shell: &str, save_history: &str, history_file: &str) {
     let s = Sandbox::new();
     let mut term = Terminal::start(&s, shell);
     term.run("true", 2);
     term.run(save_history, 3);
-    term.run("whoops list", 4);
     let out = term.finish();
-    assert!(out.contains("Nothing to undo yet."), "{out}");
+    let journals = s.journals();
+    assert!(
+        !journals.contains(history_file),
+        "the history file shouldn't be in the journal:\n{journals}\n{out}"
+    );
 }
 
 #[test]
 fn bash_history_is_not_recorded() {
-    history_is_not_recorded("/bin/bash", "history -w");
+    history_is_not_recorded("/bin/bash", "history -w", ".bash_history");
 }
 
 #[test]
 fn fish_history_is_not_recorded() {
     if let Some(fish) = installed("fish") {
-        history_is_not_recorded(&fish, "builtin history save");
+        history_is_not_recorded(&fish, "builtin history save", "fish_history");
     }
 }
 
