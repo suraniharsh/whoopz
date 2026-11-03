@@ -140,8 +140,17 @@ by itself:
    The test terminal answers both. If your shell hangs at startup in a test, it's probably
    asking something else.
 
-6. **Run the tests in your shell's version** if it isn't the one on your machine. Packaged
-   versions differ: CI found a fish 3.7 bug that fish 4.9 didn't show.
+6. **Run the tests in other versions of your shell** with the shell lab, which runs the whole
+   suite in containers with the newest (Arch) and long-term (Ubuntu 24.04) versions of every
+   shell. It needs Docker. Packaged versions differ: the lab's fish 3.7 caught a bug fish 4.9
+   didn't show.
+
+   ```sh
+   scripts/shell-lab.sh                 # every image in tests/lab/
+   scripts/shell-lab.sh arch fish       # one image, only tests with "fish" in the name
+   ```
+
+   If your shell isn't in an image yet, add it to the Dockerfiles in `tests/lab/`.
 
 ## Debugging
 

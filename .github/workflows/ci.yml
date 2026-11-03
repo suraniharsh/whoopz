@@ -71,3 +71,23 @@ jobs:
       # Can't run here (no ARM machine), but it must keep building.
       - name: build aarch64 (static)
         run: cargo build --release --locked --target aarch64-unknown-linux-musl
+
+  shell-lab:
+    name: tests in many shells and versions
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lab
+          cache-on-failure: true
+
+      # bash, zsh, fish, dash, tcsh, nushell, xonsh, elvish: newest (Arch) and LTS (Ubuntu 24.04).
+      - name: shell lab
+        run: scripts/shell-lab.sh

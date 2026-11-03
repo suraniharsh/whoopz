@@ -14,7 +14,8 @@ cargo run --bin whoops
 ```
 
 The interactive tests use bash, and zsh and fish when they're installed (they're skipped
-otherwise).
+otherwise). To run them in every shell and in older versions, use the shell lab (needs Docker):
+`scripts/shell-lab.sh`. CI runs it on every push.
 
 Release builds are static, so one file runs on any distribution:
 
