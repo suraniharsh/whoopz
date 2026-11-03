@@ -2,7 +2,7 @@
   <img src="assets/logo/logo-rounded.svg" width="128" alt="Whoopz logo: an undo arrow around a terminal prompt">
 </p>
 <p align="center">
-  <a href="https://discord.gg/RWuSdBhhFM"><img src="https://img.shields.io/badge/Discord-join%20the%20server-5865F2?logo=discord&logoColor=white" alt="Join the Whoopz Discord"></a>
+  <a href="https://discord.gg/RWuSdBhhFM"><img src="https://img.shields.io/discord/1567268836468596847?logo=discord&logoColor=white&label=Discord&color=5865F2" alt="Join the Whoopz Discord"></a>
 </p>
 
 # Whoopz
