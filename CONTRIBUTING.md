@@ -23,6 +23,11 @@ cargo build --release --target x86_64-unknown-linux-musl
 scripts/portable-check.sh target/x86_64-unknown-linux-musl/release/whoops   # needs Docker
 ```
 
+## Adding a shell
+
+Whoopz needs a small hook per shell to know where commands start and end. The protocol, the
+rules learned the hard way, and a step-by-step guide are in [docs/hooks.md](docs/hooks.md).
+
 ## Testing safely
 
 Whoopz sits in the middle of every file delete. **Only try it in a throwaway folder or a VM**,
