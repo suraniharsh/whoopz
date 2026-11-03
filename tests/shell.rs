@@ -614,21 +614,46 @@ fn interactive_fish_undo_is_per_command_line() {
     }
 }
 
-#[test]
-fn interactive_fish_redirect_is_undone() {
-    // fish opens `> file` itself, in the shell process, so only the hook can tell which
-    // command it belongs to.
-    let Some(fish) = installed("fish") else {
-        return;
-    };
+/// Overwriting a file is undone. In most shells the shell writes that file itself, not a
+/// separate program, so only the hook can tell which command it belongs to.
+fn overwrite_is_undone(shell: &str, overwrite_notes: &str) {
     let s = Sandbox::new();
     s.write("notes", "old\n");
 
-    let mut term = Terminal::start(&s, &fish);
-    term.run("echo new > notes", 2);
+    let mut term = Terminal::start(&s, shell);
+    term.run(overwrite_notes, 2);
     term.run("whoops", 3);
     let out = term.finish();
     assert_eq!(s.read("notes"), "old\n", "{out}");
+}
+
+#[test]
+fn interactive_fish_redirect_is_undone() {
+    if let Some(fish) = installed("fish") {
+        overwrite_is_undone(&fish, "echo new > notes");
+    }
+}
+
+#[test]
+fn interactive_nu_undo_is_per_command_line() {
+    // `rm` is built into nushell: the shell itself deletes the file.
+    if let Some(nu) = installed("nu") {
+        interactive_undo_is_per_command_line(&nu);
+    }
+}
+
+#[test]
+fn interactive_nu_save_is_undone() {
+    if let Some(nu) = installed("nu") {
+        overwrite_is_undone(&nu, r#""new\n" | save -f notes"#);
+    }
+}
+
+#[test]
+fn nu_history_is_not_recorded() {
+    if let Some(nu) = installed("nu") {
+        history_is_not_recorded(&nu, "ls | length", "history.txt");
+    }
 }
 
 /// A background job's changes get their own entry. They never get mixed into the command

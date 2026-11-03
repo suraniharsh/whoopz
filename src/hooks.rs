@@ -10,6 +10,7 @@
 //! - **bash** starts with `--rcfile <session>/bashrc`, which loads `~/.bashrc` first.
 //! - **zsh** starts with `ZDOTDIR=<session>/zdotdir`, whose files load your own ones first.
 //! - **fish** starts with `-C 'source <session>/hook.fish'`, which runs after your own config.
+//! - **nushell** starts with `-e 'source <session>/hook.nu'`, which runs after your own config.
 
 use std::fs;
 use std::io;
@@ -23,6 +24,7 @@ pub enum Shell {
     Bash,
     Zsh,
     Fish,
+    Nu,
     Other,
 }
 
@@ -31,6 +33,7 @@ pub fn detect(shell: &Path) -> Shell {
         Some(name) if name.starts_with("bash") => Shell::Bash,
         Some(name) if name.starts_with("zsh") => Shell::Zsh,
         Some(name) if name.starts_with("fish") => Shell::Fish,
+        Some("nu") => Shell::Nu,
         _ => Shell::Other,
     }
 }
@@ -67,6 +70,15 @@ pub fn install(shell: &Shell, session_dir: &Path, cmd: &mut Command) -> io::Resu
             fs::write(&hook, FISH_HOOK)?;
             cmd.env("WHOOPZ_FISH_HOOK", &hook)
                 .args(["-i", "-C", "source \"$WHOOPZ_FISH_HOOK\""]);
+            Ok(true)
+        }
+        Shell::Nu => {
+            let hook = session_dir.join("hook.nu");
+            fs::write(&hook, NU_HOOK)?;
+            // A raw string (r#'…'#) holds any path. `source` needs the path written out: nushell
+            // reads sourced files before running anything, so it can't come from a variable.
+            let source = format!("source r#'{}'#", hook.display());
+            cmd.args(["-e", &source]);
             Ok(true)
         }
         Shell::Other => Ok(false),
@@ -184,4 +196,26 @@ end
 function __whoopz_exit --on-event fish_exit
     __whoopz_send end
 end
+"#;
+
+const NU_HOOK: &str = r#"# Written by `whoops shell`: the Whoopz hook for nushell. Your own config has already run.
+#
+# nushell can't redirect to a descriptor by number (there's no `>&197`), so messages are
+# appended to /dev/fd/<n>: the same pipe, reached by name. Whoopz sees that open, finds a pipe
+# rather than a file, and records nothing.
+def __whoopz_send [message: string] {
+    $"($message)\u{0}" | save --append $"/dev/fd/($env.WHOOPZ_MARK_FD)"
+}
+
+# nushell saves its history after every command. That isn't part of your command.
+__whoopz_send $"ignore ($nu.history-path)"
+
+# Run before each command line, and before each prompt. Ours go first, so changes made by other
+# prompt hooks don't count as part of the last command.
+$env.config.hooks.pre_execution = (
+    [{|| __whoopz_send $"start (commandline)" }] ++ ($env.config.hooks.pre_execution? | default [])
+)
+$env.config.hooks.pre_prompt = (
+    [{|| __whoopz_send "end" }] ++ ($env.config.hooks.pre_prompt? | default [])
+)
 "#;

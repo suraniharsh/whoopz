@@ -54,7 +54,7 @@ install -m 755 target/x86_64-unknown-linux-musl/release/whoops ~/.local/bin/whoo
 ## Use
 
 ```sh
-whoops shell          # start the shell you're in (bash, zsh or fish) with Whoopz watching it
+whoops shell          # start the shell you're in (bash, zsh, fish or nushell), watched
 whoops shell --shell fish
 ```
 
@@ -141,7 +141,7 @@ is only freed when the session is cleaned up. Sessions are removed a week after 
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [the vision](docs/vision.md). Whoopz works with
-bash, zsh and fish today; to add your shell, see [docs/hooks.md](docs/hooks.md).
+bash, zsh, fish and nushell today; to add your shell, see [docs/hooks.md](docs/hooks.md).
 
 ## License
 

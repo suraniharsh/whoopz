@@ -4,8 +4,8 @@ Whoopz sees every file change any program makes, in any shell, because it watche
 kernel level. What it can't see on its own is **where one command ends and the next begins**,
 and what you typed. A shell hook tells it.
 
-This page is for anyone adding a hook for a new shell. Hooks for **bash**, **zsh** and **fish**
-exist ([`src/hooks.rs`](../src/hooks.rs)); a hook is usually 10–30 lines of shell code.
+This page is for anyone adding a hook for a new shell. Hooks for **bash**, **zsh**, **fish** and
+**nushell** exist ([`src/hooks.rs`](../src/hooks.rs)); a hook is usually 10–30 lines of shell code.
 
 ## Why a hook, and what happens without one
 
@@ -63,7 +63,9 @@ Each of these was learned from a real bug, found by a test.
 
 2. **Write by duplicating the descriptor, never by opening a file.** `>&$WHOOPZ_MARK_FD` copies
    an existing descriptor. Something like `> /dev/fd/197` *opens* a file, which Whoopz watches.
-   Check your shell can redirect to a two- or three-digit descriptor number.
+   Check your shell can redirect to a two- or three-digit descriptor number. If it can't
+   redirect to a number at all (nushell), append to `/dev/fd/$WHOOPZ_MARK_FD` instead: that
+   path is the same pipe, and Whoopz records nothing for it because it isn't a real file.
 
 3. **Send `end` before anything else runs at the prompt.** Prompt tools (starship, git status in
    the prompt) write cache files. If `end` comes after them, their files count as part of the
@@ -94,6 +96,7 @@ Each of these was learned from a real bug, found by a test.
 | bash | `bash --rcfile <session>/bashrc -i`; that file sources `~/.bashrc` first | `DEBUG` trap (first command after a prompt, or a new `$HISTCMD`) / first entry of `PROMPT_COMMAND`, `EXIT` trap. Joins `bash-preexec` if it's loaded. | `$HISTFILE` |
 | zsh | `ZDOTDIR=<session>/zdotdir`; its `.zshenv` and `.zshrc` load the user's own first, then restore `ZDOTDIR` | `preexec` / first in `precmd_functions`, `zshexit` | `$HISTFILE` |
 | fish | `fish -i -C 'source <session>/hook.fish'`; `-C` runs after the user's config | `fish_preexec` / `fish_postexec`, `fish_exit` | `$XDG_DATA_HOME/fish/`, `fish_variables` |
+| nushell | `nu -e 'source <session>/hook.nu'`; `-e` runs after the user's config, then stays interactive | first in `hooks.pre_execution` / first in `hooks.pre_prompt` (no exit hook; history is saved after every command anyway) | `$nu.history-path` |
 
 ## Background jobs
 
@@ -113,7 +116,6 @@ by itself:
 
    | Shell | Before / after a command |
    |---|---|
-   | nushell | `$env.config.hooks.pre_execution` / `pre_prompt` |
    | xonsh | `@events.on_precommand` / `@events.on_postcommand` |
    | elvish | `edit:after-readline` / `edit:before-readline` |
    | tcsh | `alias postcmd` / `alias precmd` |
