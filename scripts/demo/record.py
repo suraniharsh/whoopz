@@ -3,7 +3,8 @@
 
     cargo build --release --target x86_64-unknown-linux-musl
     python3 scripts/demo/record.py target/x86_64-unknown-linux-musl/release/whoops docs/demo.cast
-    agg --font-size 22 --theme monokai --last-frame-duration 4 docs/demo.cast docs/demo.gif
+    agg --font-family "JetBrainsMono Nerd Font Mono" --font-size 22 --theme monokai \
+        --last-frame-duration 4 docs/demo.cast docs/demo.gif
 
 It writes an asciinema recording (asciicast v2). Turn it into a GIF with agg
 (https://github.com/asciinema/agg), or play it with `asciinema play docs/demo.cast`.
@@ -123,8 +124,10 @@ def record(whoops, home, cast_path):
         pass
     shutil.rmtree(run_dir, ignore_errors=True)
 
-    # Drop the final "exit" from the recording.
-    last = max(i for i, e in enumerate(events) if "ls src" in e[2] or "main.rs" in e[2])
+    # End on the prompt after the last command, before "exit" is typed.
+    last = max(i for i, e in enumerate(events) if "main.rs" in e[2])
+    while last + 1 < len(events) and "❯" not in events[last][2].split("main.rs")[-1]:
+        last += 1
     events = events[: last + 1]
 
     header = {"version": 2, "width": WIDTH, "height": HEIGHT, "title": "whoops"}

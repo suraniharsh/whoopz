@@ -4,6 +4,8 @@
 
 Ran `rm`, `mv`, `>`, `sed -i` or `cp` by mistake? Type `whoops` and your files come back.
 
+![rm -rf src, then whoops brings it all back](docs/demo.gif)
+
 > **Status: early.** Undo works for bash and zsh, but it is new. Try it in a throwaway folder
 > before you trust it with files you care about.
 
