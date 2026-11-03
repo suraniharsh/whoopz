@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo/logo-rounded.svg" width="128" alt="Whoopz logo: an undo arrow around a terminal prompt">
+</p>
+
 # Whoopz
 
 **Always-on undo for the Linux terminal.**

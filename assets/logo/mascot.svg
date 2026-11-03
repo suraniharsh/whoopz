@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Whoopz mascot: an oops face. The eyes are the terminal chevrons > <, the mouth an undo arrow. See-through background: Discord emoji, stickers. -->
+  <circle cx="256" cy="256" r="240" fill="#FF7A59"/>
+  <path d="M 150 180 L 202 214 L 150 248" fill="none" stroke="#15161C" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 362 180 L 310 214 L 362 248" fill="none" stroke="#15161C" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 320.1 267.0 A 74 74 0 1 1 182.0 304.0" fill="none" stroke="#15161C" stroke-width="26" stroke-linecap="round"/>
+  <path d="M 306.0 242.7 L 353.0 263.1 L 300.3 293.6 Z" fill="#15161C" stroke="#15161C" stroke-width="9.1" stroke-linejoin="round"/>
+</svg>
