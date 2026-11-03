@@ -7,6 +7,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-04
+
 ### Added
 
 - `whoops shell` starts your shell with Whoopz watching it: bash, zsh, fish, nushell or elvish.
@@ -29,3 +31,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Clear errors on systems where Whoopz can't work: an old kernel, seccomp blocked by a
   sandbox, or `ptrace_scope` 2 or 3.
 - `WHOOPZ_DEBUG=1` (or a file path) shows every call Whoopz pauses.
+
+[Unreleased]: https://github.com/suraniharsh/whoopz/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/suraniharsh/whoopz/releases/tag/v0.1.0
