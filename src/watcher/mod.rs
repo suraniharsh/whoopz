@@ -1,4 +1,4 @@
-//! The watcher: gets told about paused system calls and decides what happens to them.
+//! The watcher: gets told about paused system calls and answers them.
 //!
 //! Only seccomp is implemented. The rest of Whoopz talks to the [`Watcher`] trait and never to
 //! seccomp directly, so a ptrace-based watcher (Plan B) can be added later as a second
@@ -17,54 +17,30 @@ pub struct PausedCall {
     pub pid: u32,
     /// The call's name, like `unlinkat`.
     pub name: String,
+    /// The six raw arguments. A path is the *address* of its text in that process's memory.
+    pub args: [u64; 6],
 }
 
 /// What to tell the kernel about a paused call.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Reply {
-    /// Let the call run as if nothing happened.
+    /// Let the kernel run the call as if nothing happened.
     Continue,
+    /// We did the call ourselves; it returned this value.
+    Return(i64),
+    /// We did the call ourselves; it failed with this errno.
+    Fail(i32),
 }
 
-pub trait Watcher {
+pub trait Watcher: Send {
     /// Wait until the next paused call arrives. `None` means every watched process has
     /// exited, so there is nothing left to watch.
     fn next(&mut self) -> Result<Option<PausedCall>>;
 
+    /// Is the process still paused on this call? A pid can be reused once a process dies, so
+    /// after reading a process's memory we check it was really the process we meant.
+    fn is_valid(&self, call: &PausedCall) -> bool;
+
     /// Answer a paused call. The process stays frozen until this is called.
     fn reply(&mut self, call: &PausedCall, reply: Reply) -> Result<()>;
-}
-
-/// After this many failures in a row, assume the watcher is broken and stop.
-const MAX_FAILURES_IN_A_ROW: u32 = 100;
-
-/// The watcher loop: handle paused calls until nothing is left to watch, or the watcher breaks.
-///
-/// For now it only reports each call and lets it go ahead. Saving files and writing the
-/// journal come in the next steps.
-///
-/// When this returns, the watcher is dropped. For seccomp, that closes the listener, and from
-/// then on every paused call fails with ENOSYS instead of hanging forever.
-pub fn run(watcher: &mut dyn Watcher) {
-    let mut failures = 0;
-    loop {
-        let call = match watcher.next() {
-            Ok(Some(call)) => call,
-            Ok(None) => return,
-            // A process killed while paused makes one receive fail. That's normal.
-            Err(_) if failures < MAX_FAILURES_IN_A_ROW => {
-                failures += 1;
-                continue;
-            }
-            Err(e) => {
-                eprintln!("whoops: the watcher stopped: {e:#}");
-                return;
-            }
-        };
-        failures = 0;
-
-        eprintln!("whoops: pid {} wants {}", call.pid, call.name);
-
-        // This fails if the process was killed while paused. Nothing to do about that.
-        let _ = watcher.reply(&call, Reply::Continue);
-    }
 }

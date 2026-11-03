@@ -1,110 +1,492 @@
-//! End-to-end tests: run real commands in a watched shell and check what the watcher saw.
+//! End-to-end tests: run real commands in a watched shell, then `whoops`, and check the files.
+//!
+//! Most tests run `whoops shell -- -c <script>`. There is no prompt in that mode, so the script
+//! sends the hook messages itself: `cmd <text>` before each command and `done_` after it. The
+//! `interactive_*` tests type into a real bash or zsh through a fake terminal instead, to check
+//! the hooks the launcher installs.
 
-use std::process::{Command, Output};
+use std::fs;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-/// Run `sh -c <script> sh <args…>` inside `whoops shell`.
-fn whoops_sh(script: &str, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_whoops"))
-        .args(["shell", "--", "-c", script, "sh"])
-        .args(args)
-        .env("SHELL", "/bin/sh")
-        .env_remove("WHOOPZ_ACTIVE")
-        .output()
-        .expect("could not run whoops")
+const BIN: &str = env!("CARGO_BIN_EXE_whoops");
+
+/// Hook messages, the way the bash hook sends them.
+const PRELUDE: &str = r#"
+cmd() { printf 'start %s\0' "$1" >&"$WHOOPZ_MARK_FD"; }
+done_() { printf 'end\0' >&"$WHOOPZ_MARK_FD"; }
+done_
+"#;
+
+/// A temporary home: files to play with in `work/`, and the session data next to it.
+struct Sandbox {
+    _tmp: tempfile::TempDir,
+    root: PathBuf,
+    work: PathBuf,
 }
 
-fn stderr(out: &Output) -> String {
-    String::from_utf8_lossy(&out.stderr).into_owned()
+impl Sandbox {
+    fn new() -> Self {
+        Self::with_data_in(None)
+    }
+
+    /// `data`: put the stash somewhere else (to test copying across drives).
+    fn with_data_in(data: Option<&Path>) -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let work = root.join("work");
+        fs::create_dir(&work).unwrap();
+        let sandbox = Self {
+            _tmp: tmp,
+            root,
+            work,
+        };
+        if let Some(data) = data {
+            fs::create_dir_all(data).unwrap();
+            fs::write(
+                sandbox.root.join("data-dir"),
+                data.as_os_str().as_encoded_bytes(),
+            )
+            .unwrap();
+        }
+        sandbox
+    }
+
+    fn data_dir(&self) -> PathBuf {
+        match fs::read_to_string(self.root.join("data-dir")) {
+            Ok(dir) => PathBuf::from(dir),
+            Err(_) => self.root.join("data"),
+        }
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        self.work.join(name)
+    }
+
+    fn write(&self, name: &str, text: &str) {
+        let path = self.path(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+
+    fn read(&self, name: &str) -> String {
+        fs::read_to_string(self.path(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
+    }
+
+    fn exists(&self, name: &str) -> bool {
+        self.path(name).symlink_metadata().is_ok()
+    }
+
+    /// Everything under `work/`, sorted.
+    fn listing(&self) -> Vec<String> {
+        fn walk(dir: &Path, base: &Path, out: &mut Vec<String>) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                out.push(path.strip_prefix(base).unwrap().display().to_string());
+                if path.is_dir() && !path.is_symlink() {
+                    walk(&path, base, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.work, &self.work, &mut out);
+        out.sort();
+        out
+    }
+
+    fn command(&self, shell: &str) -> Command {
+        let mut cmd = Command::new(BIN);
+        let bin_dir = Path::new(BIN).parent().unwrap();
+        let path = format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        cmd.current_dir(&self.work)
+            .env("SHELL", shell)
+            .env("HOME", &self.root)
+            .env("XDG_DATA_HOME", self.data_dir())
+            .env("XDG_RUNTIME_DIR", &self.root)
+            .env("PATH", path)
+            .env_remove("WHOOPZ_ACTIVE")
+            .env_remove("WHOOPZ_SOCK")
+            .env_remove("ZDOTDIR");
+        cmd
+    }
+
+    /// Run a bash script inside `whoops shell`.
+    fn run(&self, script: &str) -> Run {
+        let out = self
+            .command("/bin/bash")
+            .args(["shell", "--", "-c", &format!("{PRELUDE}{script}")])
+            .output()
+            .expect("could not run whoops");
+        Run(out)
+    }
+}
+
+struct Run(Output);
+
+impl Run {
+    fn stdout(&self) -> String {
+        String::from_utf8_lossy(&self.0.stdout).into_owned()
+    }
+    fn stderr(&self) -> String {
+        String::from_utf8_lossy(&self.0.stderr).into_owned()
+    }
+    fn ok(self) -> Self {
+        assert!(
+            self.0.status.success(),
+            "exit {:?}\nstdout:\n{}\nstderr:\n{}",
+            self.0.status,
+            self.stdout(),
+            self.stderr()
+        );
+        self
+    }
 }
 
 #[test]
-fn rm_is_seen_and_still_deletes() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("notes.txt");
-    std::fs::write(&file, "hello").unwrap();
+fn rm_then_undo_brings_the_file_back() {
+    let s = Sandbox::new();
+    s.write("notes.txt", "hello");
 
-    let out = whoops_sh(r#"rm -- "$1""#, &[file.to_str().unwrap()]);
+    let run = s
+        .run("cmd 'rm notes.txt'; rm notes.txt; done_; whoops")
+        .ok();
 
-    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(s.read("notes.txt"), "hello");
     assert!(
-        stderr(&out).contains("unlink"),
-        "delete not seen: {}",
-        stderr(&out)
-    );
-    assert!(!file.exists(), "the delete should still happen");
-}
-
-#[test]
-fn mv_is_seen_and_still_moves() {
-    let dir = tempfile::tempdir().unwrap();
-    let from = dir.path().join("a.txt");
-    let to = dir.path().join("b.txt");
-    std::fs::write(&from, "hello").unwrap();
-
-    let out = whoops_sh(
-        r#"mv -- "$1" "$2""#,
-        &[from.to_str().unwrap(), to.to_str().unwrap()],
-    );
-
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(
-        stderr(&out).contains("rename"),
-        "move not seen: {}",
-        stderr(&out)
-    );
-    assert!(
-        !from.exists() && to.exists(),
-        "the move should still happen"
+        run.stdout().contains("restored notes.txt"),
+        "{}",
+        run.stdout()
     );
 }
 
 #[test]
-fn overwrite_is_seen() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("notes.txt");
-    std::fs::write(&file, "old").unwrap();
+fn rm_rf_then_undo_brings_the_whole_tree_back() {
+    let s = Sandbox::new();
+    s.write("proj/src/main.rs", "fn main() {}");
+    s.write("proj/README", "readme");
+    s.write("proj/src/deep/er/x", "x");
+    std::os::unix::fs::symlink("README", s.path("proj/link")).unwrap();
+    let before = s.listing();
 
-    let out = whoops_sh(r#"echo new > "$1""#, &[file.to_str().unwrap()]);
+    s.run("cmd 'rm -rf proj'; rm -rf proj; done_; test ! -e proj && whoops")
+        .ok();
 
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert!(
-        stderr(&out).contains("open"),
-        "overwrite not seen: {}",
-        stderr(&out)
+    assert_eq!(s.listing(), before);
+    assert_eq!(s.read("proj/src/main.rs"), "fn main() {}");
+    assert_eq!(
+        fs::read_link(s.path("proj/link")).unwrap(),
+        Path::new("README")
     );
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), "new\n");
 }
 
 #[test]
-fn reads_are_not_paused() {
-    let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("notes.txt");
-    std::fs::write(&file, "hello").unwrap();
+fn mv_onto_an_existing_file_then_undo_brings_both_back() {
+    let s = Sandbox::new();
+    s.write("a.txt", "a");
+    s.write("b.txt", "b");
 
-    let out = whoops_sh(r#"cat -- "$1""#, &[file.to_str().unwrap()]);
+    s.run("cmd 'mv a.txt b.txt'; mv a.txt b.txt; done_; whoops")
+        .ok();
 
-    assert!(out.status.success(), "{}", stderr(&out));
-    assert_eq!(String::from_utf8_lossy(&out.stdout), "hello");
-    assert!(
-        !stderr(&out).contains("wants"),
-        "a read was paused: {}",
-        stderr(&out)
+    assert_eq!(s.read("a.txt"), "a");
+    assert_eq!(s.read("b.txt"), "b");
+}
+
+#[test]
+fn overwrite_then_undo_brings_the_old_contents_back() {
+    let s = Sandbox::new();
+    s.write("notes.txt", "old");
+
+    s.run("cmd 'echo new > notes.txt'; echo new > notes.txt; done_; whoops")
+        .ok();
+
+    assert_eq!(s.read("notes.txt"), "old");
+}
+
+#[test]
+fn sed_in_place_then_undo_leaves_no_trace() {
+    let s = Sandbox::new();
+    s.write("conf", "x=1\n");
+    let before = s.listing();
+
+    s.run("cmd sed; sed -i s/1/2/ conf; done_; grep -q x=2 conf && whoops")
+        .ok();
+
+    assert_eq!(s.read("conf"), "x=1\n");
+    assert_eq!(
+        s.listing(),
+        before,
+        "sed's temporary file should be gone too"
     );
+}
+
+#[test]
+fn cp_to_a_new_file_then_undo_removes_it() {
+    let s = Sandbox::new();
+    s.write("a", "data");
+
+    s.run("cmd cp; cp a b; done_; test -e b && whoops").ok();
+
+    assert!(!s.exists("b"));
+    assert_eq!(s.read("a"), "data");
+}
+
+#[test]
+fn mkdir_and_new_files_then_undo_removes_them() {
+    let s = Sandbox::new();
+
+    s.run("cmd mk; mkdir -p x/y && touch x/y/z && ln -s z x/y/l; done_; whoops")
+        .ok();
+
+    assert!(s.listing().is_empty(), "{:?}", s.listing());
+}
+
+#[test]
+fn truncate_then_undo_brings_the_contents_back() {
+    let s = Sandbox::new();
+    s.write("log", "lots of lines\n");
+
+    s.run("cmd t; truncate -s 0 log; done_; test ! -s log && whoops")
+        .ok();
+
+    assert_eq!(s.read("log"), "lots of lines\n");
+}
+
+#[test]
+fn undo_goes_one_command_at_a_time_and_by_number() {
+    // The script as a whole is command 1, so `rm a` is command 2.
+    let s = Sandbox::new();
+    s.write("a", "a");
+    s.write("b", "b");
+    s.write("c", "c");
+
+    let run = s
+        .run(
+            "cmd 'rm a'; rm a; done_
+             cmd 'rm b'; rm b; done_
+             cmd 'rm c'; rm c; done_
+             whoops 2 && test -e a && test ! -e b && test ! -e c
+             whoops && test -e c && test ! -e b
+             whoops && test -e b
+             whoops list
+             whoops; echo \"exit=$?\"",
+        )
+        .ok();
+
+    let out = run.stdout();
+    assert!(out.contains("(undone)"), "{out}");
+    assert!(out.contains("Nothing to undo."), "{out}");
+    assert!(out.contains("exit=1"), "{out}");
+    assert_eq!(s.read("a") + &s.read("b") + &s.read("c"), "abc");
+}
+
+#[test]
+fn undo_never_overwrites_something_new() {
+    let s = Sandbox::new();
+    s.write("f", "original");
+
+    let run = s
+        .run("cmd 'rm f'; rm f; done_; echo replacement > f; whoops; echo \"exit=$?\"")
+        .ok();
+
+    assert_eq!(s.read("f"), "replacement\n");
+    assert!(run.stdout().contains("skipped"), "{}", run.stdout());
+    assert!(run.stdout().contains("exit=1"), "{}", run.stdout());
+}
+
+#[test]
+fn changes_between_commands_are_not_saved() {
+    let s = Sandbox::new();
+    s.write("f", "x");
+
+    let run = s.run("rm f; whoops list").ok();
+
+    assert!(
+        run.stdout().contains("Nothing to undo yet."),
+        "{}",
+        run.stdout()
+    );
+}
+
+#[test]
+fn reads_are_not_recorded() {
+    let s = Sandbox::new();
+    s.write("f", "hello");
+
+    let run = s.run("cmd cat; cat f >&2; done_; whoops list").ok();
+
+    assert!(
+        run.stdout().contains("Nothing to undo yet."),
+        "{}",
+        run.stdout()
+    );
+}
+
+#[test]
+fn files_on_another_drive_are_copied() {
+    // The stash goes under target/ (on the project's drive), the files under /tmp. If those
+    // are the same drive here, this test has nothing to show and passes trivially.
+    let data =
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("xdev-{}", std::process::id()));
+    let s = Sandbox::with_data_in(Some(&data));
+    s.write("notes.txt", "hello");
+    s.write("other", "old");
+
+    s.run(
+        "cmd 'rm notes.txt'; rm notes.txt; done_
+         cmd over; echo new > other; done_
+         whoops && whoops",
+    )
+    .ok();
+
+    assert_eq!(s.read("notes.txt"), "hello");
+    assert_eq!(s.read("other"), "old");
+    let _ = fs::remove_dir_all(&data);
 }
 
 #[test]
 fn exit_code_is_passed_through() {
-    let out = whoops_sh("exit 3", &[]);
+    let s = Sandbox::new();
+    let out = s
+        .command("/bin/bash")
+        .args(["shell", "--", "-c", "exit 3"])
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(3));
 }
 
 #[test]
 fn refuses_to_start_inside_itself() {
-    let out = Command::new(env!("CARGO_BIN_EXE_whoops"))
+    let s = Sandbox::new();
+    let out = s
+        .command("/bin/bash")
         .args(["shell", "--", "-c", "true"])
         .env("WHOOPZ_ACTIVE", "1")
         .output()
         .unwrap();
     assert!(!out.status.success());
-    assert!(stderr(&out).contains("already inside"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("already inside"));
+}
+
+#[test]
+fn undo_outside_a_whoops_shell_explains_itself() {
+    let s = Sandbox::new();
+    let out = s.command("/bin/bash").output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not inside a whoops shell"));
+}
+
+// --- interactive shells, through a fake terminal ---
+
+/// A shell running in a pseudo-terminal, typed into like a person would.
+struct Terminal {
+    input: fs::File,
+    output: Arc<Mutex<String>>,
+    child: std::process::Child,
+}
+
+impl Terminal {
+    fn start(s: &Sandbox, shell: &str) -> Self {
+        let pty = nix::pty::openpty(None, None).unwrap();
+        let slave = fs::File::from(pty.slave);
+        let child = s
+            .command(shell)
+            .arg("shell")
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::from(slave.try_clone().unwrap()))
+            .stderr(Stdio::from(slave))
+            .spawn()
+            .unwrap();
+
+        let master = fs::File::from(pty.master);
+        let output = Arc::new(Mutex::new(String::new()));
+        {
+            let output = output.clone();
+            let mut reader = master.try_clone().unwrap();
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = reader.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    output
+                        .lock()
+                        .unwrap()
+                        .push_str(&String::from_utf8_lossy(&buf[..n]));
+                }
+            });
+        }
+        let mut term = Self {
+            input: master,
+            output,
+            child,
+        };
+        term.run("true", 1);
+        term
+    }
+
+    /// Type a command line, then wait until it has finished. Each line ends by printing a
+    /// number computed by the shell, so the typed text (echoed back) can't be mistaken for it.
+    fn run(&mut self, line: &str, n: u32) {
+        let marker = (900_000 + n).to_string();
+        writeln!(self.input, "{line}; echo $((900000 + {n}))").unwrap();
+        let start = Instant::now();
+        while !self.output.lock().unwrap().contains(&marker) {
+            assert!(
+                start.elapsed() < Duration::from_secs(15),
+                "timed out waiting for `{line}`. Output so far:\n{}",
+                self.output.lock().unwrap()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Let the prompt come back (and the hook send "end") before typing on.
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    fn finish(mut self) -> String {
+        writeln!(self.input, "exit").unwrap();
+        let _ = self.child.wait();
+        self.output.lock().unwrap().clone()
+    }
+}
+
+fn interactive_undo_is_per_command_line(shell: &str) {
+    let s = Sandbox::new();
+    s.write("a", "a");
+    s.write("b", "b");
+
+    let mut term = Terminal::start(&s, shell);
+    term.run("rm a", 2);
+    term.run("rm b", 3);
+    term.run("whoops", 4); // undoes `rm b` only
+    let only_b = s.exists("b") && !s.exists("a");
+    term.run("whoops", 5); // then `rm a`
+    let out = term.finish();
+    assert!(only_b, "the first undo should bring back only b:\n{out}");
+    assert!(s.exists("a"), "the second undo should bring back a:\n{out}");
+    assert!(out.contains("Undid"), "{out}");
+}
+
+#[test]
+fn interactive_bash_undo_is_per_command_line() {
+    interactive_undo_is_per_command_line("/bin/bash");
+}
+
+#[test]
+fn interactive_zsh_undo_is_per_command_line() {
+    let Some(zsh) = ["/usr/bin/zsh", "/bin/zsh"]
+        .into_iter()
+        .find(|p| Path::new(p).exists())
+    else {
+        eprintln!("zsh isn't installed; skipping");
+        return;
+    };
+    interactive_undo_is_per_command_line(zsh);
 }

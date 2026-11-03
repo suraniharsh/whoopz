@@ -17,8 +17,12 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
+libc = "0.2.191"
 libseccomp = "0.4.0"
-nix = { version = "0.31.3", features = ["poll", "signal", "socket", "uio"] }
+nix = { version = "0.31.3", features = ["fs", "poll", "process", "signal", "socket", "uio"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 
 [dev-dependencies]
+nix = { version = "0.31.3", features = ["term"] }
 tempfile = "3.27.0"

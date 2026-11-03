@@ -9,5 +9,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `whoops shell` starts your shell with Whoopz watching it. For now it only reports the calls
-  that change files (delete, rename, truncate, overwrite); it doesn't save anything yet.
+- `whoops shell` starts your shell (bash or zsh) with Whoopz watching it.
+- `whoops` undoes the last command that changed files: deletes (including `rm -rf`), moves
+  and renames, overwrites (`>`, `cp` onto a file, `sed -i`), truncates, and new files and
+  folders.
+- `whoops list` shows what each command changed, and `whoops <n>` undoes a specific one.
+- Undo never overwrites anything: if something new is in the way, that step is skipped and
+  reported.

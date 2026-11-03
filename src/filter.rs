@@ -5,7 +5,6 @@
 
 use anyhow::{Context, Result};
 use libseccomp::{ScmpAction, ScmpFilterContext, ScmpSyscall, scmp_cmp};
-use nix::libc;
 
 /// Calls that pause every time they are made.
 ///
@@ -26,6 +25,13 @@ const ALWAYS: &[&str] = &[
     "ftruncate",
     // old way to create-or-empty a file
     "creat",
+    // new folders and new names: undo removes them again
+    "mkdir",
+    "mkdirat",
+    "link",
+    "linkat",
+    "symlink",
+    "symlinkat",
     // newer open: its flags sit behind a pointer the filter can't read, so pause all of them
     "openat2",
 ];
@@ -51,21 +57,24 @@ pub fn build() -> Result<ScmpFilterContext> {
     }
 
     // `open` and `openat` are made constantly, mostly to read. Pause them only when they would
-    // empty the file (O_TRUNC), which is what `> file` and `cp` onto a file do. The filter can
-    // look at flags because they are a plain number; it could not look at the path.
-    let truncating = libc::O_TRUNC as u64;
-    ctx.add_rule_conditional(
-        ScmpAction::Notify,
-        ScmpSyscall::from_name("open")?,
-        // open(path, flags, mode): flags are argument 1
-        &[scmp_cmp!($arg1 & (truncating) == truncating)],
-    )?;
-    ctx.add_rule_conditional(
-        ScmpAction::Notify,
-        ScmpSyscall::from_name("openat")?,
-        // openat(dir, path, flags, mode): flags are argument 2
-        &[scmp_cmp!($arg2 & (truncating) == truncating)],
-    )?;
+    // empty the file (O_TRUNC, what `> file` and `cp` onto a file do) or might create one
+    // (O_CREAT). The filter can look at flags because they are a plain number; it could not
+    // look at the path. Two rules for the same call mean "either one".
+    for flag in [libc::O_TRUNC, libc::O_CREAT] {
+        let flag = flag as u64;
+        ctx.add_rule_conditional(
+            ScmpAction::Notify,
+            ScmpSyscall::from_name("open")?,
+            // open(path, flags, mode): flags are argument 1
+            &[scmp_cmp!($arg1 & (flag) == flag)],
+        )?;
+        ctx.add_rule_conditional(
+            ScmpAction::Notify,
+            ScmpSyscall::from_name("openat")?,
+            // openat(dir, path, flags, mode): flags are argument 2
+            &[scmp_cmp!($arg2 & (flag) == flag)],
+        )?;
+    }
 
     Ok(ctx)
 }

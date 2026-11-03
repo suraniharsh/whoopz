@@ -4,7 +4,8 @@
 
 Ran `rm`, `mv`, `>`, `sed -i` or `cp` by mistake? Type `whoops` and your files come back.
 
-> **Status: early development. Nothing works yet.** Do not trust it with files you care about.
+> **Status: early.** Undo works for bash and zsh, but it is new. Try it in a throwaway folder
+> before you trust it with files you care about.
 
 ## The idea
 
@@ -27,29 +28,72 @@ Deleted files are kept with a hard link, so even a 10 GB file is saved instantly
 
 `whoops` reads the journal backwards and puts everything back.
 
-## Planned commands
+## Install
+
+You need Linux 5.5 or newer, Rust, and `libseccomp` (`libseccomp` on Arch, `libseccomp-dev` on
+Debian/Ubuntu).
 
 ```sh
-whoops          # undo the last command
-whoops list     # show recent commands and what they changed
-whoops 3        # undo command #3
+git clone https://github.com/suraniharsh/whoopz
+cd whoopz
+cargo install --path . --locked              # puts `whoops` in ~/.cargo/bin
+# or: cargo install --path . --locked --root ~/.local   (puts it in ~/.local/bin)
 ```
+
+## Use
+
+```sh
+whoops shell          # start your shell with Whoopz watching it
+```
+
+Inside that shell, work as usual. When something goes wrong:
+
+```sh
+whoops                # undo the last command that changed files
+whoops list           # see what each command changed
+whoops 3              # undo command 3 from the list
+exit                  # leave the watched shell
+```
+
+```text
+$ rm -rf proj
+$ whoops list
+   2  rm -rf proj                               4 deleted
+$ whoops
+Undid 2: rm -rf proj
+  restored proj
+  restored proj/src
+  restored proj/src/main.rs
+  restored proj/README
+```
+
+To start every terminal this way, add this to the end of `~/.bashrc` (or `~/.zshrc`):
+
+```sh
+[ -z "$WHOOPZ_ACTIVE" ] && command -v whoops >/dev/null && whoops shell && exit
+```
+
+Set `WHOOPZ_DEBUG=1` before `whoops shell` to see every call Whoopz pauses.
 
 ## What it can't undo
 
 - Anything that leaves your machine: `git push`, email, API calls
 - Databases changing their own files
-- `sudo` commands (they error inside a Whoopz shell)
-- Files on another drive than the stash (they need a real copy)
+- `sudo` commands: `sudo` gives an error inside a Whoopz shell
+- Files over 512 MB on a different drive from `~/.local/share` (a hard link can't cross
+  drives, and a copy that big is skipped, with a warning)
+- Changes a background job makes after the prompt is back
+- Commands from an earlier `whoops shell` session: undo works within the session it happened in
+- A shell started inside the watched shell (`bash`, `zsh`): everything in it counts as one command
 
 Whoopz is a **safety net, not a sandbox**. It is not a security boundary. See
 [SECURITY.md](SECURITY.md).
 
-## Requirements
+## Where things are kept
 
-- Linux 5.5 or newer
-- bash or zsh
-- `libseccomp`
+Each session has a folder in `~/.local/share/whoopz/sessions/` with its journal and the saved
+files. A deleted file is kept with a hard link, so keeping it needs no copy; its disk space
+is only freed when the session is cleaned up. Sessions are removed a week after they end.
 
 ## Contributing
 

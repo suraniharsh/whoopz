@@ -6,7 +6,7 @@
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 
 use anyhow::Result;
-use libseccomp::{ScmpNotifReq, ScmpNotifResp, ScmpNotifRespFlags};
+use libseccomp::{ScmpNotifReq, ScmpNotifResp, ScmpNotifRespFlags, notify_id_valid};
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
@@ -56,12 +56,21 @@ impl Watcher for SeccompWatcher {
             id: req.id,
             pid: req.pid,
             name,
+            args: req.data.args,
         }))
     }
 
+    fn is_valid(&self, call: &PausedCall) -> bool {
+        notify_id_valid(self.listener.as_raw_fd(), call.id).is_ok()
+    }
+
     fn reply(&mut self, call: &PausedCall, reply: Reply) -> Result<()> {
+        let none = ScmpNotifRespFlags::empty();
         let resp = match reply {
-            Reply::Continue => ScmpNotifResp::new_continue(call.id, ScmpNotifRespFlags::empty()),
+            Reply::Continue => ScmpNotifResp::new_continue(call.id, none),
+            Reply::Return(value) => ScmpNotifResp::new_val(call.id, value, none),
+            // The kernel wants errors as negative numbers, like a raw system call returns them.
+            Reply::Fail(errno) => ScmpNotifResp::new_error(call.id, -errno, none),
         };
         resp.respond(self.listener.as_raw_fd())?;
         Ok(())

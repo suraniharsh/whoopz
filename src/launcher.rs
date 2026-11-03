@@ -2,33 +2,49 @@
 //!
 //! ```text
 //! whoops (this process, never filtered)
-//!   │ 1. make a socket pair: a private line between us and the child
+//!   │ 1. create the session folder, the hook pipe and the messenger socket
 //!   │ 2. fork. In the child, before it becomes the shell:
-//!   │      a. attach the filter          → from now on the child is watched
-//!   │      b. send the listener to us    → over the socket pair
-//!   │      c. exec the shell             → the filter stays on, and every program
-//!   │                                      the shell starts inherits it
-//!   │ 3. receive the listener and start the watcher on its own thread
-//!   │ 4. wait for the shell to exit, and exit with its code
+//!   │      a. put the hook pipe at fd 197    → the shell hook writes "start"/"end" there
+//!   │      b. attach the filter               → from now on the child is watched
+//!   │      c. send the listener to us         → over a socket pair
+//!   │      d. exec the shell                  → the filter stays on, and every program
+//!   │                                           the shell starts inherits it
+//!   │ 3. receive the listener and start three threads:
+//!   │      watcher  answers paused calls
+//!   │      marks    keeps the hook pipe drained
+//!   │      control  answers `whoops` / `whoops list`
+//!   │ 4. reap children until the shell exits, then exit with its code
 //! ```
 
+use std::fs::File;
 use std::io::{self, IoSlice, IoSliceMut};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::os::unix::net::UnixListener;
+use std::os::unix::process::CommandExt;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
+use nix::fcntl::OFlag;
 use nix::sys::signal::{SigHandler, Signal, signal};
 use nix::sys::socket::{
     AddressFamily, ControlMessage, ControlMessageOwned, MsgFlags, SockFlag, SockType, recvmsg,
     sendmsg, socketpair,
 };
+use nix::sys::wait::{WaitStatus, waitpid};
+use nix::unistd::Pid;
 
-use crate::filter;
-use crate::watcher::{self, seccomp::SeccompWatcher};
+use crate::control::SOCK_VAR;
+use crate::hooks::{self, MARK_FD};
+use crate::session::{self, Marks, Session};
+use crate::watcher::seccomp::SeccompWatcher;
+use crate::{engine, filter};
 
 /// Set inside a watched shell, so `whoops shell` can't be started inside itself.
 const ACTIVE_VAR: &str = "WHOOPZ_ACTIVE";
+
+/// Set to 1 to print every paused call and the answer it got.
+const DEBUG_VAR: &str = "WHOOPZ_DEBUG";
 
 /// Start the shell under the watcher and return its exit code once it ends.
 pub fn run_shell(args: &[String]) -> Result<i32> {
@@ -37,7 +53,44 @@ pub fn run_shell(args: &[String]) -> Result<i32> {
     }
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
 
-    // 1. The socket pair. CLOEXEC: neither end leaks into the shell once it starts.
+    // 1. The session, the hook pipe and the messenger socket.
+    let data = session::data_dir()?;
+    session::clean_old(&data);
+    let mut session = Session::create(&data)?;
+
+    let (mark_read, mark_write) = nix::unistd::pipe2(OFlag::O_CLOEXEC | OFlag::O_NONBLOCK)?;
+    let mark_poll = mark_read.try_clone()?;
+    session.set_marks(Marks::new(File::from(mark_read)));
+
+    let sock_path = session.socket_path()?;
+    let control = UnixListener::bind(&sock_path)
+        .with_context(|| format!("couldn't create the socket {}", sock_path.display()))?;
+
+    let mut cmd = Command::new(&shell);
+    cmd.env(ACTIVE_VAR, "1")
+        .env(SOCK_VAR, &sock_path)
+        .env("WHOOPZ_MARK_FD", MARK_FD.to_string());
+
+    if args.is_empty() {
+        let kind = hooks::detect(shell.as_ref());
+        if !hooks::install(&kind, &session.dir, &mut cmd)? {
+            eprintln!(
+                "whoops: no command hook for {shell}, so the whole session counts as one command"
+            );
+            session.start_command(format!("{shell} session"));
+        }
+    } else {
+        // `whoops shell -- -c "…"`: no prompt, no hook. The whole run is one command.
+        cmd.args(args);
+        session.start_command(args.join(" "));
+    }
+
+    // Orphaned processes (a program that "daemonizes") get handed to us instead of init. They
+    // stay our descendants, which Linux requires before we may read their memory.
+    // SAFETY: plain prctl with integer arguments.
+    unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
+
+    // 2. Fork and exec. `pre_exec` runs in the child, after the fork and before the exec.
     let (ours, theirs) = socketpair(
         AddressFamily::Unix,
         SockType::Stream,
@@ -45,35 +98,80 @@ pub fn run_shell(args: &[String]) -> Result<i32> {
         SockFlag::SOCK_CLOEXEC,
     )?;
     let theirs_fd = theirs.as_raw_fd();
-
-    // 2. Fork and exec. `pre_exec` runs in the child, after the fork and before the exec.
-    let mut cmd = Command::new(&shell);
-    cmd.args(args).env(ACTIVE_VAR, "1");
+    let mark_fd = mark_write.as_raw_fd();
     // SAFETY: the closure runs in the child right after fork. That is only risky when the
     // parent has other threads (one might hold a lock the child then waits on forever). We
-    // haven't started any yet; the watcher thread comes after the spawn.
+    // haven't started any yet; they come after the spawn.
     unsafe {
-        cmd.pre_exec(move || attach_filter(theirs_fd).map_err(io::Error::other));
+        cmd.pre_exec(move || {
+            place_mark_fd(mark_fd)?;
+            attach_filter(theirs_fd).map_err(io::Error::other)
+        });
     }
-    let mut child = cmd
+    let child = cmd
         .spawn()
         .with_context(|| format!("could not start {shell}"))?;
+    let shell_pid = Pid::from_raw(child.id() as i32);
 
-    // Close our copy of the child's end. If the child dies before sending the listener, its
+    // Close our copies of the child's ends. If the child dies before sending the listener, its
     // copy closes too, and `receive_listener` gets "end of file" instead of waiting forever.
     drop(theirs);
+    drop(mark_write);
 
-    // 3. Receive the listener and start watching.
+    // 3. Receive the listener and start the threads.
     let listener = receive_listener(&ours)?;
     ignore_terminal_signals();
-    let mut seccomp = SeccompWatcher::new(listener);
-    std::thread::spawn(move || watcher::run(&mut seccomp));
 
-    // 4. Wait for the shell. Exiting the process also stops the watcher thread.
-    let status = child.wait()?;
-    Ok(status
-        .code()
-        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)))
+    let session = Arc::new(Mutex::new(session));
+    let debug = std::env::var_os(DEBUG_VAR).is_some_and(|v| v == "1");
+    let watcher = Box::new(SeccompWatcher::new(listener));
+    {
+        let session = session.clone();
+        std::thread::spawn(move || engine::run(watcher, session, debug));
+    }
+    {
+        let session = session.clone();
+        std::thread::spawn(move || engine::drain_marks(mark_poll, session));
+    }
+    {
+        let session = session.clone();
+        std::thread::spawn(move || crate::control::serve(control, session));
+    }
+
+    // 4. Wait for the shell, reaping any orphans handed to us on the way.
+    let code = wait_for(shell_pid);
+    let _ = std::fs::remove_file(&sock_path);
+    Ok(code)
+}
+
+/// Reap children until `shell` exits. Returns its exit code (128 + signal if it was killed).
+fn wait_for(shell: Pid) -> i32 {
+    loop {
+        match waitpid(Pid::from_raw(-1), None) {
+            Ok(WaitStatus::Exited(pid, code)) if pid == shell => return code,
+            Ok(WaitStatus::Signaled(pid, sig, _)) if pid == shell => return 128 + sig as i32,
+            Ok(_) => continue, // an orphan, or the shell being stopped/continued
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(_) => return 1, // no children left at all
+        }
+    }
+}
+
+/// Runs in the child: put the hook pipe at [`MARK_FD`], where the hook expects it.
+fn place_mark_fd(fd: RawFd) -> io::Result<()> {
+    // SAFETY: plain fd calls on fds we own.
+    unsafe {
+        if fd == MARK_FD {
+            // Already in place: only the close-on-exec flag has to go, so it survives exec.
+            if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        } else if libc::dup2(fd, MARK_FD) < 0 {
+            // dup2 gives the copy no close-on-exec flag, so the shell inherits it.
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 /// Runs in the child: attach the filter, then hand the listener to the parent.
