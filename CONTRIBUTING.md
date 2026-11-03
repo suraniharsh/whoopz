@@ -61,3 +61,20 @@ pull request descriptions and replies must be in your own words.
 ## License
 
 Whoopz is [MIT](LICENSE) licensed, and your contributions are licensed under the same terms.
+
+## Releasing
+
+1. Make sure everything for the release is under `## [Unreleased]` in `CHANGELOG.md`.
+2. On an up-to-date `main`, run `scripts/release.sh 0.1.0`. It sets the version in
+   `Cargo.toml`, moves the `[Unreleased]` entries under `## [0.1.0] - <today>`, updates the
+   compare links, commits `chore: release 0.1.0` and tags `v0.1.0`. Nothing is pushed yet.
+3. Look it over, then `git push && git push origin v0.1.0`.
+
+Pushing the tag runs `.github/workflows/release.yml`. It checks the tag matches `Cargo.toml` and
+the changelog has the version, runs the tests, builds static binaries for x86_64 and ARM64,
+checks the x86_64 one on four distributions, and publishes a GitHub release with those
+binaries, `SHA256SUMS`, and the version's changelog section as notes. A version with a dash
+(`0.2.0-beta.1`) becomes a pre-release.
+
+To try the whole build without publishing, run the workflow by hand: **Actions → release →
+Run workflow**. The binaries are attached to the run.

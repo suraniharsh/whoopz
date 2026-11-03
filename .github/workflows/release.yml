@@ -1,48 +1,156 @@
 name: release
 
-# Push a tag like v0.1.0 to publish static binaries for x86_64 and ARM64.
+# Make a release with `scripts/release.sh 0.1.0`, then push the tag it creates: this builds the
+# static binaries and publishes them on GitHub, with that version's CHANGELOG section as notes.
+#
+# "Run workflow" by hand builds everything the same way, without publishing: a dry run. The
+# binaries are then attached to the run as artifacts.
+
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
+  check:
+    name: tests, version and changelog
     runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: the tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME doesn't match version $version in Cargo.toml. Use scripts/release.sh."
+            exit 1
+          fi
+
+      - name: the changelog has a section for it
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          if [ -z "$(scripts/changelog-section.sh "${GITHUB_REF_NAME#v}")" ]; then
+            echo "::error::CHANGELOG.md has no section for ${GITHUB_REF_NAME#v}. Use scripts/release.sh."
+            exit 1
+          fi
+
+      - name: shells for the interactive tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zsh fish
+
+      # Keep in step with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+
+      - name: tests
+        run: cargo test --locked
+
+  build:
+    name: build ${{ matrix.arch }}
+    needs: check
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-musl
+          - arch: aarch64
+            target: aarch64-unknown-linux-musl
     steps:
       - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.1
-          targets: x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
+          targets: ${{ matrix.target }}
 
-      - name: build
-        run: |
-          cargo build --release --locked --target x86_64-unknown-linux-musl
-          cargo build --release --locked --target aarch64-unknown-linux-musl
+      - name: build (static)
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: check the x86_64 binary on other distributions
-        run: scripts/portable-check.sh target/x86_64-unknown-linux-musl/release/whoops
+      # The x86_64 binary can run here, so make sure it works on other distributions. The ARM64
+      # one can't run on this machine.
+      - name: run it on Ubuntu 20.04, Debian, Fedora and Alpine
+        if: matrix.arch == 'x86_64'
+        run: scripts/portable-check.sh target/${{ matrix.target }}/release/whoops
 
       - name: package
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
         run: |
-          mkdir dist
-          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
-            arch=${target%%-*}
-            name="whoops-${GITHUB_REF_NAME}-linux-${arch}"
-            mkdir "$name"
-            cp "target/$target/release/whoops" README.md LICENSE CHANGELOG.md "$name/"
-            tar -czf "dist/$name.tar.gz" "$name"
-          done
-          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
+          set -eu
+          case "$GITHUB_REF" in
+            refs/tags/*) version="$GITHUB_REF_NAME" ;;
+            *) version="${GITHUB_SHA:0:7}" ;;
+          esac
+          name="whoops-$version-linux-$ARCH"
+          mkdir -p "$name" dist
+          cp "target/$TARGET/release/whoops" README.md LICENSE CHANGELOG.md "$name/"
+          tar -czf "dist/$name.tar.gz" "$name"
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: publish the release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: checksums
+        run: cd dist && sha256sum * > SHA256SUMS
+
+      - name: release notes from the changelog
+        run: |
+          set -eu
+          tag="$GITHUB_REF_NAME"
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$tag"
+          {
+            scripts/changelog-section.sh "${tag#v}"
+            echo
+            echo "## Install"
+            echo
+            echo "One static file for any Linux 5.5 or newer. Nothing else to install."
+            echo
+            echo '```sh'
+            echo "curl -LO $url/whoops-$tag-linux-x86_64.tar.gz   # or linux-aarch64"
+            echo "tar -xzf whoops-$tag-linux-x86_64.tar.gz"
+            echo "install -m 755 whoops-$tag-linux-x86_64/whoops ~/.local/bin/whoops"
+            echo '```'
+            echo
+            echo "Check the download with \`sha256sum -c SHA256SUMS --ignore-missing\`."
+          } > notes.md
+
+      # A tag with a dash, like v0.2.0-beta.1, is published as a pre-release.
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes "See CHANGELOG.md."
+        run: |
+          set -eu
+          tag="$GITHUB_REF_NAME"
+          prerelease=""
+          case "$tag" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$tag" dist/* --title "Whoopz ${tag#v}" --notes-file notes.md $prerelease
