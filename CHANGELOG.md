@@ -25,6 +25,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Background jobs get their own `[background]` entry in `whoops list` instead of being mixed
   into whatever command is running. Plain `whoops` leaves them alone; `whoops <n>` undoes one.
   Their changes after the prompt is back are now saved too.
+- `whoops shell --fallback`: if Whoopz can't start, say why and start the shell without it.
+  For terminal configs, so a problem never leaves you without a terminal.
 - Clear errors on systems where Whoopz can't work (old kernel, seccomp blocked by a sandbox,
   `ptrace_scope` 2 or 3).
 - `WHOOPZ_DEBUG=1` (or a file path) shows every paused call and where its process sits in the

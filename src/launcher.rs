@@ -187,6 +187,16 @@ pub fn run_shell(shell_flag: Option<&str>, args: &[String]) -> Result<i32> {
     Ok(code)
 }
 
+/// Replace this process with the shell, unwatched. Only returns if that fails.
+pub fn exec_unwatched(shell_flag: Option<&str>, args: &[String]) -> anyhow::Error {
+    let shell = match choose_shell(shell_flag) {
+        Ok(shell) => shell,
+        Err(e) => return e,
+    };
+    let err = Command::new(&shell).args(args).exec();
+    anyhow::Error::new(err).context(format!("could not start {}", shell.display()))
+}
+
 /// Stop early, with a clear reason, on systems where Whoopz can't work.
 fn check_system() -> Result<()> {
     // Letting a paused call go ahead (SECCOMP_USER_NOTIF_FLAG_CONTINUE) arrived in Linux 5.5.

@@ -78,10 +78,23 @@ Undid 2: rm -rf proj
 ```
 
 To start every terminal this way, the simplest is to set it in your terminal. For kitty, in
-`kitty.conf`:
+`kitty.conf` (with fish; use your shell's path):
 
 ```
-shell whoops shell --shell fish
+shell sh -c 'test -x ~/.local/bin/whoops && exec ~/.local/bin/whoops shell --fallback --shell /usr/bin/fish; exec /usr/bin/fish'
+```
+
+`--fallback` means that if Whoopz can't start, it says why and starts the shell without it, so
+you're never left without a terminal; the `test -x` does the same if `whoops` isn't installed.
+kitty only loads its shell integration when it starts the shell itself, so with fish also add
+`~/.config/fish/conf.d/whoopz-kitty.fish`:
+
+```fish
+if status is-interactive; and set -q WHOOPZ_ACTIVE; and set -q KITTY_INSTALLATION_DIR
+    set --global KITTY_SHELL_INTEGRATION enabled
+    source "$KITTY_INSTALLATION_DIR/shell-integration/fish/vendor_conf.d/kitty-shell-integration.fish"
+    set --prepend fish_complete_path "$KITTY_INSTALLATION_DIR/shell-integration/fish/vendor_completions.d"
+end
 ```
 
 Or at the end of `~/.bashrc` / `~/.zshrc`:

@@ -56,6 +56,11 @@ enum Command {
         #[arg(long)]
         shell: Option<String>,
 
+        /// If Whoopz can't start, say why and start the shell without it, instead of exiting.
+        /// Meant for terminal configs, so a problem never leaves you without a terminal
+        #[arg(long)]
+        fallback: bool,
+
         /// Arguments for the shell, after `--` (for example: whoops shell -- -c "rm notes.txt")
         #[arg(last = true)]
         args: Vec<String>,
@@ -67,7 +72,19 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let code = match cli.command {
-        Some(Command::Shell { shell, args }) => launcher::run_shell(shell.as_deref(), &args)?,
+        Some(Command::Shell {
+            shell,
+            fallback,
+            args,
+        }) => match launcher::run_shell(shell.as_deref(), &args) {
+            Ok(code) => code,
+            Err(e) if fallback => {
+                eprintln!("whoops: {e:#}");
+                eprintln!("whoops: starting the shell without Whoopz");
+                return Err(launcher::exec_unwatched(shell.as_deref(), &args));
+            }
+            Err(e) => return Err(e),
+        },
         Some(Command::List) => control::request("list")?,
         None => match cli.number {
             Some(n) => control::request(&format!("undo {n}"))?,

@@ -386,6 +386,21 @@ fn refuses_to_start_inside_itself() {
 }
 
 #[test]
+fn fallback_starts_the_shell_unwatched_when_whoopz_cant_start() {
+    let s = Sandbox::new();
+    // Starting inside a whoops shell is refused, which is an easy way to make startup fail.
+    let out = s
+        .command("/bin/bash")
+        .args(["shell", "--fallback", "--", "-c", "echo plain shell"])
+        .env("WHOOPZ_ACTIVE", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "plain shell\n");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("without Whoopz"));
+}
+
+#[test]
 fn undo_outside_a_whoops_shell_explains_itself() {
     let s = Sandbox::new();
     let out = s.command("/bin/bash").output().unwrap();
