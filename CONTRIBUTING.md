@@ -4,6 +4,8 @@ Before you build a feature, read [the vision](docs/vision.md) (including what Wh
 do) and [the roadmap](docs/roadmap.md). When unsure, open an issue first, so no one spends time
 on a pull request that doesn't fit.
 
+Questions and chat: [Discord](https://discord.gg/RWuSdBhhFM). Bugs and feature requests: GitHub issues.
+
 ## Building
 
 You need [rustup](https://rustup.rs), which picks up `rust-toolchain.toml`. Nothing else:

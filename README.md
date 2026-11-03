@@ -1,6 +1,9 @@
 <p align="center">
   <img src="assets/logo/logo-rounded.svg" width="128" alt="Whoopz logo: an undo arrow around a terminal prompt">
 </p>
+<p align="center">
+  <a href="https://discord.gg/RWuSdBhhFM"><img src="https://img.shields.io/badge/Discord-join%20the%20server-5865F2?logo=discord&logoColor=white" alt="Join the Whoopz Discord"></a>
+</p>
 
 # Whoopz
 
@@ -141,6 +144,12 @@ Whoopz is a **safety net, not a sandbox**. It is not a security boundary. See
 Each session has a folder in `~/.local/share/whoopz/sessions/` with its journal and the saved
 files. A deleted file is kept with a hard link, so keeping it needs no copy; its disk space
 is only freed when the session is cleaned up. Sessions are removed a week after they end.
+
+## Community
+
+Questions, ideas, or Whoopz just saved your day? Come say hi on
+[Discord](https://discord.gg/RWuSdBhhFM). Bugs and feature requests go to
+[GitHub issues](https://github.com/suraniharsh/whoopz/issues), so they don't get lost in chat.
 
 ## Contributing
 

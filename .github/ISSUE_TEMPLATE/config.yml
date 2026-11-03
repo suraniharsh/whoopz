@@ -1,6 +1,6 @@
 blank_issues_enabled: false
 
 contact_links:
-  - name: Questions and general chat
-    url: https://github.com/suraniharsh/whoopz/discussions
-    about: Ask in Discussions. Issues are for bugs and feature requests.
+  - name: Questions and chat
+    url: https://discord.gg/RWuSdBhhFM
+    about: Ask in the Discord server. Issues are for bugs and feature requests.
