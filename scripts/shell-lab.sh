@@ -15,7 +15,7 @@ images=${1:-$(ls tests/lab)}
 filter=${2:-}
 
 echo "building the tests (static)…"
-tests=$(cargo test --locked --target x86_64-unknown-linux-musl --no-run 2>&1 \
+tests=$(cargo test --locked --color never --target x86_64-unknown-linux-musl --no-run 2>&1 \
     | sed -n 's/.*Executable tests\/shell.rs (\(.*\))$/\1/p')
 [ -n "$tests" ] || { echo "couldn't find the test binary" >&2; exit 1; }
 
