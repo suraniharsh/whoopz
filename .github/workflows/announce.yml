@@ -1,0 +1,79 @@
+name: announce
+
+# Post a release to Discord, as a card with that version's CHANGELOG section (the way Sonora
+# does it). The release workflow calls this after publishing. Run it by hand to (re)post any
+# release.
+#
+# Needs the repository secret DISCORD_RELEASE_WEBHOOK: the webhook URL of the #releases
+# channel (Discord: Edit Channel → Integrations → Webhooks). Without it, this skips.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release tag to announce, like v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  announce:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: post the release to Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "::notice::No DISCORD_RELEASE_WEBHOOK secret, so nothing was posted to Discord."
+            exit 0
+          fi
+
+          version="${TAG#v}"
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG"
+          # Discord breaks the line at every newline, so join the wrapped continuation lines.
+          notes="$(scripts/changelog-section.sh "$version" | perl -0pe 's/\n  +(?=\S)/ /g')"
+          if [ -z "$notes" ]; then
+            echo "::error::CHANGELOG.md has no section for $version"
+            exit 1
+          fi
+
+          # A card: the title links to the release; the coral matches the logo (#FF7A59).
+          # The webhook's own name and avatar (set in Discord) are used.
+          jq -n \
+            --arg title "Whoopz $TAG" \
+            --arg url "$url" \
+            --arg notes "$notes" \
+            '{
+              embeds: [{
+                title: $title,
+                url: $url,
+                description: (
+                  if ($notes | length) > 4000 then
+                    $notes[0:3900] + "\n\n[Full notes on GitHub](" + $url + ")"
+                  else
+                    $notes
+                  end
+                ),
+                color: 16742745
+              }]
+            }' |
+          curl --fail-with-body --silent --show-error \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --data @- \
+            "$DISCORD_WEBHOOK_URL"
+          echo "Posted $TAG to Discord."
