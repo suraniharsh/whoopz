@@ -15,3 +15,10 @@ name = "whoops"
 path = "src/main.rs"
 
 [dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+libseccomp = "0.4.0"
+nix = { version = "0.31.3", features = ["poll", "signal", "socket", "uio"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
