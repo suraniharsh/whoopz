@@ -656,6 +656,67 @@ fn nu_history_is_not_recorded() {
     }
 }
 
+#[test]
+fn interactive_elvish_undo_is_per_command_line() {
+    if let Some(elvish) = installed("elvish") {
+        interactive_undo_is_per_command_line(&elvish);
+    }
+}
+
+#[test]
+fn interactive_elvish_redirect_is_undone() {
+    if let Some(elvish) = installed("elvish") {
+        overwrite_is_undone(&elvish, "echo new > notes");
+    }
+}
+
+#[test]
+fn elvish_history_is_not_recorded() {
+    // elvish's history is written by its own background daemon, a separate process.
+    if let Some(elvish) = installed("elvish") {
+        history_is_not_recorded(&elvish, "true", "db.bolt");
+    }
+}
+
+/// elvish can only be given one rc file, so Whoopz's loads yours. What yours defines must
+/// still be there.
+#[test]
+fn elvish_keeps_your_rc() {
+    let Some(elvish) = installed("elvish") else {
+        return;
+    };
+    let s = Sandbox::new();
+    let rc = s.root.join(".config/elvish/rc.elv");
+    fs::create_dir_all(rc.parent().unwrap()).unwrap();
+    fs::write(&rc, "var my-var = 42\nfn my-fn { echo from-my-rc }\n").unwrap();
+
+    let mut term = Terminal::start(&s, &elvish);
+    term.run("my-fn; echo var-is-$my-var", 2);
+    let out = term.finish();
+    assert!(out.contains("from-my-rc"), "{out}");
+    assert!(out.contains("var-is-42"), "{out}");
+}
+
+/// elvish has no process groups at all: a process started in the background by one command
+/// must still not be counted as part of a later one.
+#[test]
+fn elvish_background_processes_get_their_own_entry() {
+    let Some(elvish) = installed("elvish") else {
+        return;
+    };
+    let s = Sandbox::new();
+    s.write("a", "a");
+
+    let mut term = Terminal::start(&s, &elvish);
+    term.run("sh -c '(sleep 1; echo bg > bgfile) &'", 2);
+    term.run("rm a", 3);
+    term.run("sleep 2", 4);
+    term.run("whoops", 5);
+    let out = term.finish();
+    assert!(s.exists("a"), "`rm a` should be undone:\n{out}");
+    assert!(s.exists("bgfile"), "the background file must stay:\n{out}");
+}
+
 /// A background job's changes get their own entry. They never get mixed into the command
 /// that happens to be running, and plain `whoops` leaves them alone.
 fn background_jobs_get_their_own_entry(shell: &str) {
@@ -723,6 +784,13 @@ fn history_is_not_recorded(shell: &str, save_history: &str, history_file: &str) 
         !journals.contains(history_file),
         "the history file shouldn't be in the journal:\n{journals}\n{out}"
     );
+    // Hooks that write to /dev/fd/<n> must not show up either (that's a pipe, not a file).
+    for pseudo in ["/dev/fd/", "/proc/"] {
+        assert!(
+            !journals.contains(pseudo),
+            "{pseudo} in the journal:\n{journals}"
+        );
+    }
 }
 
 #[test]

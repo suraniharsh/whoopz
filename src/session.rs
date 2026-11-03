@@ -90,8 +90,9 @@ pub struct Session {
     background: HashMap<BackgroundKey, (u64, Option<u64>)>,
     /// The entry the call being handled belongs to.
     target: Option<u64>,
-    /// The shell process, and path prefixes it keeps its own files under.
+    /// The shell process, its program, and path prefixes it keeps its own files under.
     shell_pid: Option<u32>,
+    shell_exe: Option<PathBuf>,
     housekeeping: Vec<Vec<u8>>,
 }
 
@@ -144,6 +145,7 @@ impl Session {
             background: HashMap::new(),
             target: None,
             shell_pid: None,
+            shell_exe: None,
             housekeeping: Vec::new(),
         })
     }
@@ -259,17 +261,30 @@ impl Session {
         target.is_some_and(|e| e.seen.insert(path.to_path_buf()))
     }
 
-    pub fn set_shell_pid(&mut self, pid: u32) {
-        self.shell_pid = Some(pid);
+    /// Paths the shell keeps its own files under, known before it starts.
+    pub fn add_housekeeping(&mut self, prefix: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+        self.housekeeping
+            .push(prefix.as_os_str().as_bytes().to_vec());
     }
 
-    /// Is this the shell itself (any of its threads) changing one of its own files?
+    pub fn set_shell_pid(&mut self, pid: u32) {
+        self.shell_pid = Some(pid);
+        self.shell_exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+    }
+
+    /// Is this the shell itself (any of its threads, or a helper running the same program, like
+    /// elvish's history daemon) changing one of its own files?
     pub fn is_housekeeping(&self, pid: u32, paths: &[&Path]) -> bool {
         use std::os::unix::ffi::OsStrExt;
         let Some(shell) = self.shell_pid else {
             return false;
         };
-        is_thread_of(shell, pid)
+        let same_program = || {
+            self.shell_exe.is_some()
+                && std::fs::read_link(format!("/proc/{pid}/exe")).ok() == self.shell_exe
+        };
+        (is_thread_of(shell, pid) || same_program())
             && !paths.is_empty()
             && paths.iter().all(|path| {
                 let bytes = path.as_os_str().as_bytes();

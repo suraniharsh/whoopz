@@ -62,14 +62,17 @@ pub struct Location {
 
 /// Work out where `name` (relative to the process's folder `dirfd`) really is.
 pub fn resolve(pid: u32, dirfd: i32, name: &[u8]) -> io::Result<Location> {
-    let cname = sys::cstring(name)?;
     if name.first() == Some(&b'/') {
+        // Some absolute paths mean something different in each process: `/dev/fd/3` is *its*
+        // descriptor 3. Look at them from the paused process's side, not ours.
+        let name = as_seen_by(pid, name);
         return Ok(Location {
             dir: Dir::Absolute,
-            name: cname,
-            path: clean(PathBuf::from(OsStr::from_bytes(name))),
+            name: sys::cstring(&name)?,
+            path: clean(PathBuf::from(OsStr::from_bytes(&name))),
         });
     }
+    let cname = sys::cstring(name)?;
 
     let link = if dirfd == libc::AT_FDCWD {
         format!("/proc/{pid}/cwd")
@@ -85,6 +88,36 @@ pub fn resolve(pid: u32, dirfd: i32, name: &[u8]) -> io::Result<Location> {
         name: cname,
         path: clean(base.join(OsStr::from_bytes(name))),
     })
+}
+
+/// Rewrite paths that point into the calling process itself (`/dev/fd/3`, `/dev/stdout`,
+/// `/proc/self/…`) to the same place under `/proc/<pid>/`.
+fn as_seen_by(pid: u32, name: &[u8]) -> Vec<u8> {
+    let own = |rest: &[u8]| [format!("/proc/{pid}").as_bytes(), rest].concat();
+    for (prefix, replacement) in [
+        (&b"/dev/fd/"[..], &b"/fd/"[..]),
+        (b"/proc/self/", b"/"),
+        (b"/proc/thread-self/", b"/"),
+    ] {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            return own(&[replacement, rest].concat());
+        }
+    }
+    for (path, fd) in [
+        (&b"/dev/stdin"[..], "0"),
+        (b"/dev/stdout", "1"),
+        (b"/dev/stderr", "2"),
+    ] {
+        if name == path {
+            return own(format!("/fd/{fd}").as_bytes());
+        }
+    }
+    name.to_vec()
+}
+
+/// `/proc` and `/sys` are the kernel's views of itself, not files anyone wants back.
+pub fn is_pseudo(path: &std::path::Path) -> bool {
+    path.starts_with("/proc") || path.starts_with("/sys")
 }
 
 /// The path of an open file descriptor in process `pid`.
@@ -186,4 +219,19 @@ pub fn child_of_shell(pid: u32, shell: u32) -> u32 {
         }
     }
     current
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paths_into_the_process_itself_are_seen_from_its_side() {
+        let seen = |p: &str| String::from_utf8(as_seen_by(42, p.as_bytes())).unwrap();
+        assert_eq!(seen("/dev/fd/197"), "/proc/42/fd/197");
+        assert_eq!(seen("/proc/self/fd/1"), "/proc/42/fd/1");
+        assert_eq!(seen("/dev/stdout"), "/proc/42/fd/1");
+        assert_eq!(seen("/home/me/notes.txt"), "/home/me/notes.txt");
+        assert_eq!(seen("/dev/fdx"), "/dev/fdx");
+    }
 }

@@ -11,10 +11,11 @@
 //! - **zsh** starts with `ZDOTDIR=<session>/zdotdir`, whose files load your own ones first.
 //! - **fish** starts with `-C 'source <session>/hook.fish'`, which runs after your own config.
 //! - **nushell** starts with `-e 'source <session>/hook.nu'`, which runs after your own config.
+//! - **elvish** starts with `-rc <session>/rc.elv`, which loads your own `rc.elv` first.
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The fd number the shell writes hook messages to. High enough that nothing else uses it.
@@ -25,6 +26,7 @@ pub enum Shell {
     Zsh,
     Fish,
     Nu,
+    Elvish,
     Other,
 }
 
@@ -34,7 +36,30 @@ pub fn detect(shell: &Path) -> Shell {
         Some(name) if name.starts_with("zsh") => Shell::Zsh,
         Some(name) if name.starts_with("fish") => Shell::Fish,
         Some("nu") => Shell::Nu,
+        Some("elvish") => Shell::Elvish,
         _ => Shell::Other,
+    }
+}
+
+/// Files a shell keeps for itself that have to be known before it starts, because it writes
+/// them before its hook can say so. elvish's daemon creates its database at startup.
+pub fn housekeeping(shell: &Shell) -> Vec<PathBuf> {
+    let env_dir = |var: &str, fallback: &str| {
+        std::env::var_os(var)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(fallback)))
+    };
+    match shell {
+        Shell::Elvish => [
+            env_dir("XDG_STATE_HOME", ".local/state"),
+            std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|dir| dir.join("elvish"))
+        .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -79,6 +104,12 @@ pub fn install(shell: &Shell, session_dir: &Path, cmd: &mut Command) -> io::Resu
             // reads sourced files before running anything, so it can't come from a variable.
             let source = format!("source r#'{}'#", hook.display());
             cmd.args(["-e", &source]);
+            Ok(true)
+        }
+        Shell::Elvish => {
+            let rc = session_dir.join("rc.elv");
+            fs::write(&rc, ELVISH_RC)?;
+            cmd.arg("-rc").arg(&rc);
             Ok(true)
         }
         Shell::Other => Ok(false),
@@ -218,4 +249,35 @@ $env.config.hooks.pre_execution = (
 $env.config.hooks.pre_prompt = (
     [{|| __whoopz_send "end" }] ++ ($env.config.hooks.pre_prompt? | default [])
 )
+"#;
+
+const ELVISH_RC: &str = r#"# Written by `whoops shell`: loads your own rc.elv, then adds the Whoopz hook.
+#
+# elvish can only be pointed at one rc file. So this one runs yours ($runtime:rc-path) and then
+# copies what it defined into the session with edit:add-vars, as if it had been the real rc.
+use os
+use runtime
+if (os:exists $runtime:rc-path) {
+    try {
+        eval (slurp < $runtime:rc-path) &on-end={|ns|
+            edit:add-vars (keys $ns | each {|k| put [$k $ns[$k]] } | make-map)
+        }
+    } catch e {
+        echo 'whoops: your rc.elv failed: '(to-string $e[reason]) >&2
+    }
+}
+
+# elvish can't redirect to a descriptor by number, so messages are appended to /dev/fd/<n>:
+# the same pipe, reached by name. Whoopz records nothing for it.
+fn __whoopz-send {|message|
+    print $message"\x00" >> /dev/fd/$E:WHOOPZ_MARK_FD
+}
+
+# elvish's history lives in a database its own daemon writes. Whoopz ignores those files from
+# the start (see `housekeeping` in hooks.rs): the daemon creates them before this file runs.
+
+# Run after each line is read (before it runs), and before each prompt. Ours go first, so
+# changes made by other prompt hooks don't count as part of the last command.
+set edit:after-readline = [{|line| __whoopz-send 'start '$line } $@edit:after-readline]
+set edit:before-readline = [{ __whoopz-send end } $@edit:before-readline]
 "#;

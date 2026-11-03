@@ -4,8 +4,8 @@ Whoopz sees every file change any program makes, in any shell, because it watche
 kernel level. What it can't see on its own is **where one command ends and the next begins**,
 and what you typed. A shell hook tells it.
 
-This page is for anyone adding a hook for a new shell. Hooks for **bash**, **zsh**, **fish** and
-**nushell** exist ([`src/hooks.rs`](../src/hooks.rs)); a hook is usually 10–30 lines of shell code.
+This page is for anyone adding a hook for a new shell. Hooks for **bash**, **zsh**, **fish**,
+**nushell** and **elvish** exist ([`src/hooks.rs`](../src/hooks.rs)); a hook is usually 10–30 lines of shell code.
 
 ## Why a hook, and what happens without one
 
@@ -65,7 +65,8 @@ Each of these was learned from a real bug, found by a test.
    an existing descriptor. Something like `> /dev/fd/197` *opens* a file, which Whoopz watches.
    Check your shell can redirect to a two- or three-digit descriptor number. If it can't
    redirect to a number at all (nushell), append to `/dev/fd/$WHOOPZ_MARK_FD` instead: that
-   path is the same pipe, and Whoopz records nothing for it because it isn't a real file.
+   path is the same pipe. Whoopz looks at `/dev/fd/…` from the shell's side (it's the
+   shell's descriptor, not Whoopz's) and records nothing there.
 
 3. **Send `end` before anything else runs at the prompt.** Prompt tools (starship, git status in
    the prompt) write cache files. If `end` comes after them, their files count as part of the
@@ -79,8 +80,10 @@ Each of these was learned from a real bug, found by a test.
 
 5. **Ignore the shell's own housekeeping.** Shells write their history file, sometimes from a
    background thread at any moment (fish rewrites its history mid-command). Send `ignore` for
-   those paths at startup. It only applies to changes the shell process makes: if *you* run
-   `rm ~/.bash_history`, that's still saved.
+   those paths at startup. It applies to changes made by the shell itself: its process, its
+   threads, and helpers running the same program (elvish's history daemon). If *you* run
+   `rm ~/.bash_history`, that's still saved. If the shell writes those files before its hook
+   can run, add them to `housekeeping()` in `src/hooks.rs`, so Whoopz knows them from the start.
 
 6. **Send `end` when the shell exits.** Shells save their history while exiting. Without an
    `end` first, that becomes part of the `exit` command.
@@ -96,6 +99,7 @@ Each of these was learned from a real bug, found by a test.
 | bash | `bash --rcfile <session>/bashrc -i`; that file sources `~/.bashrc` first | `DEBUG` trap (first command after a prompt, or a new `$HISTCMD`) / first entry of `PROMPT_COMMAND`, `EXIT` trap. Joins `bash-preexec` if it's loaded. | `$HISTFILE` |
 | zsh | `ZDOTDIR=<session>/zdotdir`; its `.zshenv` and `.zshrc` load the user's own first, then restore `ZDOTDIR` | `preexec` / first in `precmd_functions`, `zshexit` | `$HISTFILE` |
 | fish | `fish -i -C 'source <session>/hook.fish'`; `-C` runs after the user's config | `fish_preexec` / `fish_postexec`, `fish_exit` | `$XDG_DATA_HOME/fish/`, `fish_variables` |
+| elvish | `elvish -rc <session>/rc.elv`; elvish takes only one rc file, so that one `eval`s the user's `rc.elv` and copies what it defined into the session with `edit:add-vars` | first in `edit:after-readline` / first in `edit:before-readline` | `$XDG_STATE_HOME/elvish`, `$XDG_RUNTIME_DIR/elvish` (registered by Whoopz before elvish starts: its history daemon creates them at once) |
 | nushell | `nu -e 'source <session>/hook.nu'`; `-e` runs after the user's config, then stays interactive | first in `hooks.pre_execution` / first in `hooks.pre_prompt` (no exit hook; history is saved after every command anyway) | `$nu.history-path` |
 
 ## Background jobs
@@ -117,7 +121,6 @@ by itself:
    | Shell | Before / after a command |
    |---|---|
    | xonsh | `@events.on_precommand` / `@events.on_postcommand` |
-   | elvish | `edit:after-readline` / `edit:before-readline` |
    | tcsh | `alias postcmd` / `alias precmd` |
    | dash | none: falls back to process groups |
 

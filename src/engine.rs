@@ -143,6 +143,11 @@ fn decide(watcher: &dyn Watcher, call: &PausedCall, s: &mut Session) -> Option<R
     if !watcher.is_valid(call) {
         return None;
     }
+    // Kernel views (`/proc`, `/sys`, and `/dev/fd/…`, which points into `/proc`) aren't files
+    // anyone wants back.
+    if prepared.paths().iter().any(|p| crate::procfs::is_pseudo(p)) {
+        return Some(Reply::Continue);
+    }
     // The shell saving its own history (or similar) isn't part of your command.
     if s.is_housekeeping(call.pid, &prepared.paths()) {
         return Some(Reply::Continue);

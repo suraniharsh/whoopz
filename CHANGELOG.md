@@ -27,6 +27,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Their changes after the prompt is back are now saved too.
 - nushell support, including its built-in commands like `rm` and `save`, which change files
   from inside the shell itself.
+- elvish support. elvish only takes one rc file, so Whoopz's loads yours first; everything
+  it defines is still there.
+- `/dev/fd/…`, `/dev/stdout` and `/proc/self/…` are looked at from the program's side, and
+  nothing in `/proc` or `/sys` is recorded.
 - `whoops shell --fallback`: if Whoopz can't start, say why and start the shell without it.
   For terminal configs, so a problem never leaves you without a terminal.
 - Clear errors on systems where Whoopz can't work (old kernel, seccomp blocked by a sandbox,

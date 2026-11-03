@@ -115,6 +115,9 @@ pub fn run_shell(shell_flag: Option<&str>, args: &[String]) -> Result<i32> {
 
     if args.is_empty() {
         let kind = hooks::detect(&shell_path);
+        for prefix in hooks::housekeeping(&kind) {
+            session.add_housekeeping(&prefix);
+        }
         if !hooks::install(&kind, &session.dir, &mut cmd)? {
             eprintln!(
                 "whoops: no command hook for {shell}, so the whole session counts as one command"
