@@ -8,6 +8,11 @@ repository = "https://github.com/suraniharsh/whoopz"
 readme = "README.md"
 keywords = ["undo", "terminal", "shell", "seccomp", "linux"]
 categories = ["command-line-utilities"]
+# Oldest Rust it's tested with (cargo install gives a clear error on older ones).
+rust-version = "1.92"
+# Only what's needed to build it. Not rust-toolchain.toml: that would make everyone who runs
+# `cargo install whoopz` download exactly the toolchain this repo pins.
+include = ["/src", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE", "/CHANGELOG.md", "/SECURITY.md"]
 
 # The project is Whoopz; the command you type is `whoops`.
 [[bin]]
