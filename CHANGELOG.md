@@ -7,6 +7,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Undo `git reset --hard`, `git checkout .`, `git restore .` and `git clean -fd`: your files
+  come back and `git status` looks like before.
+
+### Changed
+
+- Undo reports each file once, in plain words ("put back the old version of app.rs"), and
+  only counts git's own files in `.git/`. Temporary files a command made and removed again
+  (git's `*.lock`, `sed -i`'s temporary file) no longer show up, and no longer cause false
+  "skipped" lines.
+
 ## [0.1.1] - 2026-11-04
 
 ### Security

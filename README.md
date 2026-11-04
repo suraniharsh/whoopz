@@ -9,7 +9,8 @@
 
 **Always-on undo for the Linux terminal.**
 
-Ran `rm`, `mv`, `>`, `sed -i` or `cp` by mistake? Type `whoops` and your files come back.
+Ran `rm`, `mv`, `>`, `sed -i`, `cp`, or even `git reset --hard` by mistake? Type `whoops` and your
+files come back.
 
 ![rm -rf src, then whoops brings it all back](docs/demo.gif)
 
@@ -118,6 +119,20 @@ Or in `~/.config/fish/config.fish`:
 if status is-interactive; and not set -q WHOOPZ_ACTIVE; and command -q whoops
     whoops shell; and exit
 end
+```
+
+It works for `git` too. Lost a day of uncommitted work to `git reset --hard`, `git checkout .`,
+`git restore .` or `git clean -fd`? `whoops` puts the files back, and `git status` looks like
+before:
+
+```text
+$ git reset --hard
+$ whoops
+Undid 7: git reset --hard
+  put back the old version of src/lib.rs
+  put back the old version of app.rs
+  restored draft.rs
+  … and 2 of git's own files in .git/
 ```
 
 Background jobs (`make &`, a file watcher) get their own `[background]` entry in

@@ -11,7 +11,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::journal::{self, Change, FileId, Line, Saved};
 use crate::session::{MAX_COPY, Session};
@@ -120,7 +120,7 @@ pub fn undo(s: &mut Session, which: Option<u64>) -> Response {
     let mut skipped = Vec::new();
     for change in target.changes.iter().rev() {
         match undo_change(s, change) {
-            Ok(Some(msg)) => done.push(msg),
+            Ok(Some(outcome)) => done.push(outcome),
             Ok(None) => {} // nothing to do: that change never went through
             Err(msg) => skipped.push(msg),
         }
@@ -130,33 +130,123 @@ pub fn undo(s: &mut Session, which: Option<u64>) -> Response {
     }
 
     let mut text = format!("Undid {}: {}\n", target.id, target.text);
-    if done.is_empty() && skipped.is_empty() {
-        text += "  nothing to put back: its changes didn't go through\n";
-    }
-    for msg in done.iter().take(SHOW) {
-        text += &format!("  {msg}\n");
-    }
-    if done.len() > SHOW {
-        text += &format!("  … and {} more\n", done.len() - SHOW);
-    }
-    for msg in &skipped {
-        text += &format!("  skipped: {msg}\n");
-    }
+    text += &report(done, &skipped);
     Response {
         text,
         code: if skipped.is_empty() { 0 } else { 1 },
     }
 }
 
+/// What one undo step did, for the report.
+enum Done {
+    /// It had been deleted; it's back.
+    Restored(PathBuf),
+    /// The command created it; it's gone again (kept in the stash).
+    Removed(PathBuf),
+    /// The command changed or replaced it; the old version is back.
+    PutBack(PathBuf),
+    RemovedDir(PathBuf),
+    /// Moved back from `to` to `from`.
+    Moved {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    Swapped(PathBuf, PathBuf),
+}
+
+impl Done {
+    fn path(&self) -> &Path {
+        match self {
+            Done::Restored(p) | Done::Removed(p) | Done::PutBack(p) | Done::RemovedDir(p) => p,
+            Done::Moved { from, .. } => from,
+            Done::Swapped(a, _) => a,
+        }
+    }
+
+    fn line(&self) -> String {
+        match self {
+            Done::Restored(p) => format!("restored {}", p.display()),
+            Done::Removed(p) => format!("removed {}", p.display()),
+            Done::PutBack(p) => format!("put back the old version of {}", p.display()),
+            Done::RemovedDir(p) => format!("removed folder {}", p.display()),
+            Done::Moved { from, to } => {
+                format!("moved {} back to {}", to.display(), from.display())
+            }
+            Done::Swapped(a, b) => format!("swapped {} and {} back", a.display(), b.display()),
+        }
+    }
+}
+
+/// The lines under "Undid …": one per file, in plain words.
+///
+/// A command that deleted a file and wrote a new one in its place (git does that) shows as
+/// "put back the old version", not as "removed" plus "restored". git's own files in `.git/`
+/// are counted, not listed: they're put back so `git status` matches, but they aren't yours.
+fn report(done: Vec<Done>, skipped: &[String]) -> String {
+    let mut merged: Vec<Done> = Vec::new();
+    for outcome in done {
+        let pair = merged.iter().position(|m| {
+            m.path() == outcome.path()
+                && matches!(
+                    (m, &outcome),
+                    (Done::Removed(_), Done::Restored(_)) | (Done::Restored(_), Done::Removed(_))
+                )
+        });
+        match pair {
+            Some(i) => merged[i] = Done::PutBack(outcome.path().to_path_buf()),
+            None => merged.push(outcome),
+        }
+    }
+
+    let in_git = |d: &Done| d.path().components().any(|c| c.as_os_str() == ".git");
+    let git_files = merged.iter().filter(|d| in_git(d)).count();
+    let lines: Vec<String> = merged
+        .iter()
+        .filter(|d| !in_git(d))
+        .map(Done::line)
+        .collect();
+
+    let mut text = String::new();
+    if lines.is_empty() && git_files == 0 && skipped.is_empty() {
+        text += "  nothing to put back: its changes didn't go through\n";
+    }
+    for line in lines.iter().take(SHOW) {
+        text += &format!("  {line}\n");
+    }
+    if lines.len() > SHOW {
+        text += &format!("  … and {} more\n", lines.len() - SHOW);
+    }
+    if git_files > 0 {
+        let s = if git_files == 1 { "" } else { "s" };
+        text += &format!("  … and {git_files} of git's own file{s} in .git/\n");
+    }
+    for msg in skipped {
+        text += &format!("  skipped: {msg}\n");
+    }
+    text
+}
+
 /// `Ok(None)`: nothing to do, because the change never went through.
-fn undo_change(s: &mut Session, change: &Change) -> Result<Option<String>, String> {
+fn undo_change(s: &mut Session, change: &Change) -> Result<Option<Done>, String> {
     match change {
         Change::Deleted { path, saved, was } => {
             if still_there(path, *was)? {
                 return Ok(None);
             }
             restore(s, path, saved)?;
-            Ok(Some(format!("restored {}", path.display())))
+            Ok(Some(Done::Restored(path.clone())))
+        }
+
+        Change::Replaced { path, saved, was } => {
+            if still_there(path, *was)? {
+                return Ok(None);
+            }
+            // Take the command's version away (into the stash), then put the old one back.
+            if lstat(path)?.is_some() {
+                move_to_stash(s, path)?;
+            }
+            restore(s, path, saved)?;
+            Ok(Some(Done::PutBack(path.clone())))
         }
 
         Change::Renamed {
@@ -181,11 +271,10 @@ fn undo_change(s: &mut Session, change: &Change) -> Result<Option<String>, Strin
                     format!("moved {} back, but not what it replaced: {e}", to.display())
                 })?;
             }
-            Ok(Some(format!(
-                "moved {} back to {}",
-                to.display(),
-                from.display()
-            )))
+            Ok(Some(Done::Moved {
+                from: from.clone(),
+                to: to.clone(),
+            }))
         }
 
         Change::Exchanged { a, b } => {
@@ -196,11 +285,7 @@ fn undo_change(s: &mut Session, change: &Change) -> Result<Option<String>, Strin
                     b.display()
                 )
             })?;
-            Ok(Some(format!(
-                "swapped {} and {} back",
-                a.display(),
-                b.display()
-            )))
+            Ok(Some(Done::Swapped(a.clone(), b.clone())))
         }
 
         Change::Overwritten { path, saved } => {
@@ -209,10 +294,7 @@ fn undo_change(s: &mut Session, change: &Change) -> Result<Option<String>, Strin
             };
             write_back(&s.stash_path(file), path)
                 .map_err(|e| format!("couldn't put back {}: {e}", path.display()))?;
-            Ok(Some(format!(
-                "put back the old contents of {}",
-                path.display()
-            )))
+            Ok(Some(Done::PutBack(path.clone())))
         }
 
         Change::Created { path } => match lstat(path)? {
@@ -222,12 +304,12 @@ fn undo_change(s: &mut Session, change: &Change) -> Result<Option<String>, Strin
             }
             Some(_) => {
                 move_to_stash(s, path)?;
-                Ok(Some(format!("removed {}", path.display())))
+                Ok(Some(Done::Removed(path.clone())))
             }
         },
 
         Change::CreatedDir { path } => match fs::remove_dir(path) {
-            Ok(()) => Ok(Some(format!("removed folder {}", path.display()))),
+            Ok(()) => Ok(Some(Done::RemovedDir(path.clone()))),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(format!("left folder {}: {e}", path.display())),
         },
@@ -340,7 +422,7 @@ fn summary(changes: &[Change]) -> String {
         match c {
             Change::Deleted { .. } => deleted += 1,
             Change::Renamed { .. } | Change::Exchanged { .. } => moved += 1,
-            Change::Overwritten { .. } => overwritten += 1,
+            Change::Overwritten { .. } | Change::Replaced { .. } => overwritten += 1,
             Change::Created { .. } | Change::CreatedDir { .. } => created += 1,
         }
     }

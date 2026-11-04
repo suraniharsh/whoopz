@@ -57,6 +57,9 @@ struct Entry {
     /// Paths whose original state this entry already saved. A program that rewrites the same
     /// file a hundred times only needs the first version kept.
     seen: HashSet<PathBuf>,
+    /// Paths that didn't exist before this entry: files it created itself. Deleting or moving
+    /// them again (temporary files, git's `*.lock`) leaves nothing to undo.
+    created: HashSet<PathBuf>,
 }
 
 impl Entry {
@@ -66,6 +69,7 @@ impl Entry {
             background,
             written: false,
             seen: HashSet::new(),
+            created: HashSet::new(),
         }
     }
 }
@@ -259,6 +263,20 @@ impl Session {
     pub fn first_time(&mut self, path: &Path) -> bool {
         let target = self.target.and_then(|id| self.entries.get_mut(&id));
         target.is_some_and(|e| e.seen.insert(path.to_path_buf()))
+    }
+
+    /// Note that the target entry created `path` itself (nothing was there before).
+    pub fn mark_created(&mut self, path: &Path) {
+        if let Some(e) = self.target.and_then(|id| self.entries.get_mut(&id)) {
+            e.created.insert(path.to_path_buf());
+        }
+    }
+
+    /// Did the target entry create `path` itself?
+    pub fn was_created(&self, path: &Path) -> bool {
+        self.target
+            .and_then(|id| self.entries.get(&id))
+            .is_some_and(|e| e.created.contains(path))
     }
 
     /// Paths the shell keeps its own files under, known before it starts.

@@ -26,8 +26,7 @@ Each shell needs a small hook so Whoopz knows where commands start and end.
 - ✅ Undo the last command, or any command by number (`whoops`, `whoops list`, `whoops <n>`)
 - ✅ Deletes, `rm -rf`, moves, overwrites (`>`, `cp`, `sed -i`), truncates, new files and folders
 - ✅ Background jobs get their own entry and never get mixed into your commands
-- 🚧 Undo `git reset --hard`, `git checkout .` and `git clean`: it works, the output needs
-  tidying (git's temporary lock files show up)
+- ✅ Undo `git reset --hard`, `git checkout .`, `git restore .` and `git clean -fd`, with a short report
 - ⬜ Undo from any terminal, even after closing the one where the mistake happened (a small
   `systemctl --user` service)
 - ⬜ `whoops show <n>`: see what an undo would bring back before doing it

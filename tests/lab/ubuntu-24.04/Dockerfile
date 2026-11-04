@@ -2,6 +2,6 @@
 FROM ubuntu:24.04
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        bash zsh fish dash tcsh xonsh elvish \
+        bash zsh fish dash tcsh xonsh elvish git \
         coreutils findutils grep sed procps \
     && rm -rf /var/lib/apt/lists/*

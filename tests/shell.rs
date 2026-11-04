@@ -418,6 +418,49 @@ fn a_delete_that_failed_leaves_nothing_to_undo() {
     assert!(out.contains("exit=0"), "{out}");
 }
 
+/// The classic: a day of uncommitted work, then `git reset --hard`. Undo brings back the
+/// edits and the staged new file, `git status` is as before, and the report is short: git's
+/// temporary `*.lock` files don't show up, and its own files are only counted.
+#[test]
+fn git_reset_hard_is_undone_cleanly() {
+    if Command::new("git").arg("--version").output().is_err() {
+        eprintln!("git isn't installed; skipping");
+        return;
+    }
+    let s = Sandbox::new();
+    let git = "git -c user.email=t@t -c user.name=t -c commit.gpgSign=false";
+    s.write("app.rs", "v1\n");
+    s.write("src/lib.rs", "lib v1\n");
+    let run = s
+        .run(&format!(
+            "{git} init -q && {git} add . && {git} commit -qm one
+             echo 'a day of work' > app.rs; echo 'lib v2' > src/lib.rs
+             echo 'never committed' > draft.rs; {git} add draft.rs
+             before=$({git} status --short)
+             cmd 'git reset --hard'; {git} reset -q --hard; done_
+             whoops; echo \"exit=$?\"
+             test \"$({git} status --short)\" = \"$before\" && echo SAME-STATUS"
+        ))
+        .ok();
+
+    let out = run.stdout();
+    assert_eq!(s.read("app.rs"), "a day of work\n", "{out}");
+    assert_eq!(s.read("src/lib.rs"), "lib v2\n", "{out}");
+    assert_eq!(s.read("draft.rs"), "never committed\n", "{out}");
+    assert!(
+        out.contains("SAME-STATUS"),
+        "git status should be as before:\n{out}"
+    );
+    assert!(out.contains("put back the old version of app.rs"), "{out}");
+    assert!(out.contains("of git's own file"), "{out}");
+    assert!(
+        !out.contains(".lock"),
+        "lock files shouldn't be listed:\n{out}"
+    );
+    assert!(!out.contains("skipped"), "{out}");
+    assert!(out.contains("exit=0"), "{out}");
+}
+
 #[test]
 fn exit_code_is_passed_through() {
     let s = Sandbox::new();

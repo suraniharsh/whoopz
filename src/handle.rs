@@ -169,13 +169,16 @@ pub fn act(call: Prepared, s: &mut Session) -> Reply {
         }
         Prepared::Create { at, is_dir } => {
             // Only something that isn't there yet is "created".
-            if sys::lstat_at(&at.dir, &at.name).is_err() && s.first_time(&at.path) {
-                let change = if is_dir {
-                    Change::CreatedDir { path: at.path }
-                } else {
-                    Change::Created { path: at.path }
-                };
-                journal(s, change);
+            if sys::lstat_at(&at.dir, &at.name).is_err() {
+                s.mark_created(&at.path);
+                if s.first_time(&at.path) {
+                    let change = if is_dir {
+                        Change::CreatedDir { path: at.path }
+                    } else {
+                        Change::Created { path: at.path }
+                    };
+                    journal(s, change);
+                }
             }
             Reply::Continue
         }
@@ -188,6 +191,11 @@ fn remove(s: &mut Session, at: Location, flags: i32) {
     let Ok(st) = sys::lstat_at(&at.dir, &at.name) else {
         return; // nothing there: the call will fail on its own
     };
+    // Something this command created itself (a temporary file, git's `*.lock`) didn't exist
+    // before it, so removing it again leaves nothing to undo.
+    if s.was_created(&at.path) {
+        return;
+    }
     let saved = if flags & libc::AT_REMOVEDIR != 0 {
         // Only empty folders can be removed, so all there is to keep is the permissions.
         if !sys::is_dir(&st) {
@@ -227,6 +235,33 @@ fn rename(s: &mut Session, from: Location, to: Location, flags: u32) {
         return;
     }
 
+    // A file this command made itself, moved into place (`index.lock` → `index`, `sed -i`'s
+    // temporary file → the real one). For undo, what matters is the old version of the target.
+    if s.was_created(&from.path) && !exchange {
+        match sys::lstat_at(&to.dir, &to.name) {
+            Ok(to_st) if !s.was_created(&to.path) => {
+                if s.first_time(&to.path)
+                    && let Some(saved) = save_existing(s, &to)
+                {
+                    let change = Change::Replaced {
+                        path: to.path,
+                        saved,
+                        was: Some(file_id(&to_st)),
+                    };
+                    journal(s, change);
+                }
+            }
+            // Nothing was there (or only something this command made): a new file appears.
+            _ => {
+                s.mark_created(&to.path);
+                if s.first_time(&to.path) {
+                    journal(s, Change::Created { path: to.path });
+                }
+            }
+        }
+        return;
+    }
+
     let change = if exchange {
         Change::Exchanged {
             a: from.path,
@@ -261,13 +296,16 @@ fn open(s: &mut Session, at: &Location, flags: i32) {
 
     match sys::stat_at(&at.dir, &at.name) {
         Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {
-            if creates && s.first_time(&at.path) {
-                journal(
-                    s,
-                    Change::Created {
-                        path: at.path.clone(),
-                    },
-                );
+            if creates {
+                s.mark_created(&at.path);
+                if s.first_time(&at.path) {
+                    journal(
+                        s,
+                        Change::Created {
+                            path: at.path.clone(),
+                        },
+                    );
+                }
             }
         }
         Ok(st) if truncates => {

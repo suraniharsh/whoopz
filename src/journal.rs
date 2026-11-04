@@ -56,6 +56,17 @@ pub enum Change {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         was: Option<FileId>,
     },
+    /// A file the command made itself (a temporary file) was moved over `path`, replacing what
+    /// was there: `git` writing `index.lock` then renaming it to `index`, `sed -i`, editors
+    /// saving safely. `saved` is the old version.
+    Replaced {
+        #[serde(with = "path_text")]
+        path: PathBuf,
+        saved: Saved,
+        /// The old file. Still there at undo time means the replace never happened.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        was: Option<FileId>,
+    },
     /// `a` and `b` swapped places (`renameat2` with `RENAME_EXCHANGE`).
     Exchanged {
         #[serde(with = "path_text")]
