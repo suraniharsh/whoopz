@@ -45,8 +45,8 @@ use crate::sys::{self, Dir};
 /// Files bigger than this are not copied (hard links have no limit).
 pub const MAX_COPY: u64 = 512 * 1024 * 1024;
 
-/// Finished sessions are removed after this long.
-const KEEP_FOR: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// Finished sessions and saved files are removed after this long.
+pub const KEEP_FOR: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// One undo entry: a command line, or a background job.
 struct Entry {
@@ -403,6 +403,11 @@ fn is_thread_of(shell: u32, pid: u32) -> bool {
     pid == shell || Path::new(&format!("/proc/{shell}/task/{pid}")).exists()
 }
 
+/// A session whose lock we can take has ended (or crashed).
+pub fn has_ended(session_dir: &Path) -> bool {
+    File::open(session_dir.join("lock")).is_ok_and(|lock| lock.try_lock().is_ok())
+}
+
 /// The socket of the session stored in `session_dir`.
 fn socket_of(session_dir: &Path) -> PathBuf {
     let id = session_dir.file_name().unwrap_or_default();
@@ -423,9 +428,7 @@ pub fn clean_old(data: &Path) {
     };
     for entry in entries.flatten() {
         let dir = entry.path();
-        // A session whose lock we can take has ended (or crashed).
-        let ended = File::open(dir.join("lock")).is_ok_and(|lock| lock.try_lock().is_ok());
-        if !ended {
+        if !has_ended(&dir) {
             continue;
         }
         let _ = fs::remove_file(socket_of(&dir));

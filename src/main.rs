@@ -10,6 +10,7 @@
 //! calls      decodes a call's raw numbers         procfs  reads paths from the paused process
 //! handle     saves what's about to be lost         sys     safe wrappers around file calls
 //! session    the journal, the stash, which command is running
+//! storage    keeps saved files under a size limit                  (whoops status)
 //! hooks      tells the watcher where commands start and end (bash, zsh)
 //! control    how `whoops` inside the shell asks the watcher for an undo
 //! undo       puts things back                                      (whoops, whoops list)
@@ -25,6 +26,7 @@ mod journal;
 mod launcher;
 mod procfs;
 mod session;
+mod storage;
 mod sys;
 mod undo;
 mod watcher;
@@ -67,6 +69,8 @@ enum Command {
     },
     /// Show the commands in this shell that changed files
     List,
+    /// Show how much disk the saved files take
+    Status,
 }
 
 fn main() -> Result<()> {
@@ -86,6 +90,13 @@ fn main() -> Result<()> {
             Err(e) => return Err(e),
         },
         Some(Command::List) => control::request("list")?,
+        Some(Command::Status) => {
+            print!(
+                "{}",
+                storage::status(&session::data_dir()?, storage::limit())
+            );
+            0
+        }
         None => match cli.number {
             Some(n) => control::request(&format!("undo {n}"))?,
             None => control::request("undo")?,

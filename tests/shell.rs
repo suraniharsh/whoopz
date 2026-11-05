@@ -1041,3 +1041,82 @@ fn special_files_are_ignored_across_drives() {
     special_files_are_ignored(&Sandbox::with_data_in(Some(&data)));
     let _ = fs::remove_dir_all(&data);
 }
+
+/// Run `whoops status` outside any shell.
+fn status(s: &Sandbox, limit: Option<&str>) -> String {
+    let mut cmd = s.command("/bin/bash");
+    if let Some(limit) = limit {
+        cmd.env("WHOOPZ_STASH_LIMIT", limit);
+    }
+    let out = cmd.arg("status").output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn status_shows_what_is_kept() {
+    let s = Sandbox::new();
+    assert!(status(&s, None).contains("Saved files: 0 B of 5.0 GB"));
+
+    s.write("big", &"x".repeat(300_000));
+    s.run("cmd 'rm big'; rm big; done_").ok();
+
+    let text = status(&s, Some("1G"));
+    assert!(text.contains(" KB of 1.0 GB"), "{text}");
+    assert!(text.contains("Sessions:    1 (0 running)"), "{text}");
+    assert!(text.contains("ended"), "{text}");
+}
+
+#[test]
+fn status_inside_a_shell_marks_that_shell() {
+    let s = Sandbox::new();
+    s.write("big", &"x".repeat(300_000));
+
+    let run = s.run("cmd 'rm big'; rm big; done_; whoops status").ok();
+
+    assert!(run.stdout().contains("(this shell)"), "{}", run.stdout());
+    assert!(run.stdout().contains("(1 running)"), "{}", run.stdout());
+}
+
+#[test]
+fn a_limit_that_makes_no_sense_never_stops_the_shell() {
+    let s = Sandbox::new();
+    let out = s
+        .command("/bin/bash")
+        .env("WHOOPZ_STASH_LIMIT", "lots")
+        .args(["shell", "--", "-c", "echo started"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("started"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("WHOOPZ_STASH_LIMIT"));
+}
+
+/// Between commands, so the watcher lets it through unsaved.
+const DROP_SAVED_FILES: &str = r#"rm -f "$XDG_DATA_HOME"/whoopz/sessions/*/stash/*"#;
+
+/// When a saved copy was dropped, undo says so and leaves the current files alone. (Taking the
+/// current version away first would lose the only copy left.)
+#[test]
+fn undo_keeps_the_current_file_when_the_saved_copy_was_dropped() {
+    let s = Sandbox::new();
+    s.write("deleted", "old");
+    s.write("overwritten", "old");
+    s.write("replaced", "old");
+
+    let run = s.run(&format!(
+        "cmd change
+         rm deleted
+         echo new > overwritten
+         sed -i s/old/new/ replaced
+         done_
+         {DROP_SAVED_FILES}
+         whoops"
+    ));
+
+    assert!(!s.exists("deleted"));
+    assert_eq!(s.read("overwritten"), "new\n");
+    assert_eq!(s.read("replaced"), "new");
+    let text = run.stdout();
+    assert_eq!(text.matches("its saved copy is gone").count(), 3, "{text}");
+}

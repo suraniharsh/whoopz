@@ -39,7 +39,11 @@ Each shell needs a small hook so Whoopz knows where commands start and end.
 
 - ✅ Deleted files kept with hard links (no copy); files on another drive copied, up to 512 MB
 - ✅ Sessions cleaned up a week after they end
-- ⬜ A total size limit for saved files, and `whoops status` to see how much is kept
+- ✅ A total size limit for saved files (5 GB, or `WHOOPZ_STASH_LIMIT`), oldest dropped first,
+  anything from the last hour always kept
+- ✅ `whoops status` to see how much is kept
+- ✅ Saved files removed after a week even if the terminal stays open
+- ⬜ Free space sooner when the drive is nearly full
 
 ## Platforms and packaging
 

@@ -7,6 +7,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `whoops status` shows how much disk the saved files take, and which sessions use the most.
+- A total size limit for saved files: 5 GB, or set `WHOOPZ_STASH_LIMIT` (`2G`, `500M`). The oldest
+  go first. Anything saved in the last hour stays, so a big `rm -rf` can still be undone.
+
+### Changed
+
+- Saved files are removed after a week even if their terminal is still open.
+- If a saved copy is gone, undo says so and leaves the current file alone.
+
 ### Fixed
 
 - A background job whose first process had already ended (`bash -c 'server &'`) showed up in

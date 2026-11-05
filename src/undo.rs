@@ -241,6 +241,7 @@ fn undo_change(s: &mut Session, change: &Change) -> Result<Option<Done>, String>
             if still_there(path, *was)? {
                 return Ok(None);
             }
+            still_kept(s, path, saved)?;
             // Take the command's version away (into the stash), then put the old one back.
             if lstat(path)?.is_some() {
                 move_to_stash(s, path)?;
@@ -292,6 +293,7 @@ fn undo_change(s: &mut Session, change: &Change) -> Result<Option<Done>, String>
             let Saved::Stash { file } = saved else {
                 return Err(format!("{} wasn't saved", path.display()));
             };
+            still_kept(s, path, saved)?;
             write_back(&s.stash_path(file), path)
                 .map_err(|e| format!("couldn't put back {}: {e}", path.display()))?;
             Ok(Some(Done::PutBack(path.clone())))
@@ -323,8 +325,24 @@ fn still_there(path: &Path, was: Option<FileId>) -> Result<bool, String> {
     Ok(lstat(path)?.is_some_and(|st| st.st_dev == was.dev && st.st_ino == was.ino))
 }
 
+/// Old saved files get dropped (see [`crate::storage`]). Check before changing anything, or
+/// undo would take away the current version and have nothing to put in its place.
+fn still_kept(s: &Session, path: &Path, saved: &Saved) -> Result<(), String> {
+    if let Saved::Stash { file } = saved
+        && lstat(&s.stash_path(file))?.is_none()
+    {
+        return Err(format!(
+            "{} can't come back: its saved copy is gone (saved files are dropped after a week, \
+             or to stay under the size limit)",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Put a removed or replaced thing back at `path`. Never overwrites anything.
 fn restore(s: &Session, path: &Path, saved: &Saved) -> Result<(), String> {
+    still_kept(s, path, saved)?;
     if lstat(path)?.is_some() {
         return Err(format!("something is already at {}", path.display()));
     }

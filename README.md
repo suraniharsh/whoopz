@@ -71,6 +71,7 @@ Inside that shell, work as usual. When something goes wrong:
 ```sh
 whoops                # undo the last command that changed files
 whoops list           # see what each command changed
+whoops status         # see how much disk the saved files take
 whoops 3              # undo command 3 from the list
 exit                  # leave the watched shell
 ```
@@ -160,8 +161,13 @@ Whoopz is a **safety net, not a sandbox**. It is not a security boundary. See
 
 Each session has a folder in `~/.local/share/whoopz/sessions/` with its journal and the saved
 files. A deleted file is kept with a hard link, so keeping it needs no copy. That also means
-**deleting a file doesn't free its disk space until the session is cleaned up**, a week after it
-ends. To free space at once, delete the session's folder.
+**deleting a file doesn't free its disk space right away**.
+
+`whoops status` shows how much is kept. Saved files are removed after a week, even if the terminal
+is still open. Past **5 GB in total**, the oldest go first, but anything saved in the last hour
+stays, so a big `rm -rf` can always be undone. To change the limit, set `WHOOPZ_STASH_LIMIT` (for
+example `2G`) where your terminal starts `whoops shell`. To free space at once, delete a session's
+folder.
 
 ## Community
 

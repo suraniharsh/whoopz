@@ -38,7 +38,7 @@ use crate::control::SOCK_VAR;
 use crate::hooks::{self, MARK_FD};
 use crate::session::{self, Marks, Session};
 use crate::watcher::seccomp::SeccompWatcher;
-use crate::{engine, filter, procfs};
+use crate::{engine, filter, procfs, storage};
 
 /// Set inside a watched shell, so `whoops shell` can't be started inside itself.
 const ACTIVE_VAR: &str = "WHOOPZ_ACTIVE";
@@ -182,6 +182,8 @@ pub fn run_shell(shell_flag: Option<&str>, args: &[String]) -> Result<i32> {
         let session = session.clone();
         std::thread::spawn(move || crate::control::serve(control, session));
     }
+    let limit = storage::limit();
+    std::thread::spawn(move || storage::keep_trimmed(&data, limit));
 
     // 4. Wait for the shell, reaping any orphans handed to us on the way.
     let code = wait_for(shell_pid);
