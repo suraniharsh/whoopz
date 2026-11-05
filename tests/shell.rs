@@ -1060,17 +1060,15 @@ fn special_files_are_ignored_across_drives() {
 
 #[test]
 fn what_couldnt_be_saved_is_in_the_list_and_not_on_the_screen() {
-    let data =
-        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("unsaved-{}", std::process::id()));
-    let s = Sandbox::with_data_in(Some(&data));
-    // Over the limit for a copy, and copied because the stash is on another drive. It's sparse,
-    // so it takes no space.
+    let s = Sandbox::new();
+    // Emptying a file needs a real copy, and this one is over the limit for that, whichever
+    // drives are involved. It's sparse, so it takes no space.
     fs::File::create(s.path("huge"))
         .unwrap()
         .set_len(600 << 20)
         .unwrap();
 
-    let run = s.run("cmd 'rm huge'; rm huge; done_; whoops list");
+    let run = s.run("cmd 'empty huge'; : > huge; done_; whoops list");
     assert!(run.stderr().is_empty(), "{}", run.stderr());
     assert!(run.stdout().contains("not saved:"), "{}", run.stdout());
     assert!(
@@ -1078,7 +1076,6 @@ fn what_couldnt_be_saved_is_in_the_list_and_not_on_the_screen() {
         "{}",
         run.stdout()
     );
-    let _ = fs::remove_dir_all(&data);
 }
 
 #[test]
