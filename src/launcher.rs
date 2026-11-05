@@ -240,7 +240,9 @@ fn explain_spawn_error(e: io::Error, shell: &str) -> anyhow::Error {
         Some(libc::EACCES) | Some(libc::EPERM) => {
             "something (a container or sandbox) doesn't allow attaching a seccomp filter"
         }
-        Some(libc::EBUSY) => "this process is already being watched in a way that conflicts",
+        Some(libc::EBUSY) => {
+            "this terminal is already being watched, by Whoopz or something like it"
+        }
         _ => return anyhow::Error::new(e).context(format!("could not start {shell}")),
     };
     anyhow::anyhow!("could not start {shell}: {why} ({e})")

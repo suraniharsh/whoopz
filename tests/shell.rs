@@ -21,6 +21,20 @@ done_() { printf 'end\0' >&"$WHOOPZ_MARK_FD"; }
 done_
 "#;
 
+/// Linux allows one watcher per process, so `whoops shell` can't start here if these tests are
+/// running in a watched terminal. Say so once, rather than failing every test with a kernel
+/// error. It writes to stderr directly, because the test runner hides `eprintln!`.
+fn stop_if_watched() {
+    if std::env::var_os("WHOOPZ_ACTIVE").is_some() {
+        let _ = std::io::stderr().write_all(
+            b"\nThese tests can't run in a terminal Whoopz is watching. Use a plain terminal, or:\n\n\
+              systemd-run --user --wait --pipe --collect --working-directory=\"$PWD\" \\\n  \
+              -E PATH=\"$PATH\" -- cargo test --locked\n\n",
+        );
+        std::process::exit(1);
+    }
+}
+
 /// A temporary home: files to play with in `work/`, and the session data next to it.
 struct Sandbox {
     _tmp: tempfile::TempDir,
@@ -35,6 +49,7 @@ impl Sandbox {
 
     /// `data`: put the stash somewhere else (to test copying across drives).
     fn with_data_in(data: Option<&Path>) -> Self {
+        stop_if_watched();
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
         let work = root.join("work");
@@ -1041,6 +1056,43 @@ fn special_files_are_ignored_across_drives() {
         PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("special-{}", std::process::id()));
     special_files_are_ignored(&Sandbox::with_data_in(Some(&data)));
     let _ = fs::remove_dir_all(&data);
+}
+
+#[test]
+fn what_couldnt_be_saved_is_in_the_list_and_not_on_the_screen() {
+    let data =
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("unsaved-{}", std::process::id()));
+    let s = Sandbox::with_data_in(Some(&data));
+    // Over the limit for a copy, and copied because the stash is on another drive. It's sparse,
+    // so it takes no space.
+    fs::File::create(s.path("huge"))
+        .unwrap()
+        .set_len(600 << 20)
+        .unwrap();
+
+    let run = s.run("cmd 'rm huge'; rm huge; done_; whoops list");
+    assert!(run.stderr().is_empty(), "{}", run.stderr());
+    assert!(run.stdout().contains("not saved:"), "{}", run.stdout());
+    assert!(
+        run.stdout().contains("huge: too big to copy"),
+        "{}",
+        run.stdout()
+    );
+    let _ = fs::remove_dir_all(&data);
+}
+
+#[test]
+fn a_call_that_cant_be_read_is_a_warning_in_the_list() {
+    let s = Sandbox::new();
+    // A path too long to read. The shell fails to open it, twice, and that's noted once.
+    let long = "a".repeat(5000);
+    let run = s.run(&format!(
+        "cmd 'bad path'; (: > {long}; : > {long}) 2>/dev/null; done_; whoops list"
+    ));
+    assert!(run.stderr().is_empty(), "{}", run.stderr());
+    let list = run.stdout();
+    assert!(list.contains("Nothing to undo yet."), "{list}");
+    assert_eq!(list.matches("during `bad path`").count(), 1, "{list}");
 }
 
 /// Run `whoops status` outside any shell.

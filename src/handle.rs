@@ -323,10 +323,7 @@ fn shrink(s: &mut Session, path: &Path, file: &File, st: &sys::Stat, len: i64) {
     if !sys::is_regular(st) || len >= st.st_size || !s.first_time(path) {
         return;
     }
-    let saved = copy_to_stash(s, file, st).unwrap_or_else(|reason| {
-        warn(path, &reason);
-        Saved::Nothing { reason }
-    });
+    let saved = copy_to_stash(s, file, st).unwrap_or_else(|reason| Saved::Nothing { reason });
     journal(
         s,
         Change::Overwritten {
@@ -350,7 +347,9 @@ fn save_existing(s: &mut Session, at: &Location) -> Option<Saved> {
             Ok(target) => Saved::Symlink {
                 target: PathBuf::from(OsString::from_vec(target)),
             },
-            Err(e) => not_saved(&at.path, format!("couldn't read the symlink: {e}")),
+            Err(e) => Saved::Nothing {
+                reason: format!("couldn't read the symlink: {e}"),
+            },
         });
     }
 
@@ -371,7 +370,7 @@ fn save_existing(s: &mut Session, at: &Location) -> Option<Saved> {
     let copied = sys::open_read_nofollow(&at.dir, &at.name)
         .map_err(|e| format!("couldn't open it: {e}"))
         .and_then(|file| copy_to_stash(s, &file, &st));
-    Some(copied.unwrap_or_else(|reason| not_saved(&at.path, reason)))
+    Some(copied.unwrap_or_else(|reason| Saved::Nothing { reason }))
 }
 
 /// Copy a file's contents into the stash, keeping its permissions and modification time.
@@ -411,17 +410,8 @@ fn copy_to_stash(s: &mut Session, file: &File, st: &sys::Stat) -> Result<Saved, 
     }
 }
 
-fn not_saved(path: &Path, reason: String) -> Saved {
-    warn(path, &reason);
-    Saved::Nothing { reason }
-}
-
 fn journal(s: &mut Session, change: Change) {
     if let Err(e) = s.record(change) {
-        eprintln!("whoops: couldn't write the journal: {e}");
+        s.journal_failed(&e);
     }
-}
-
-fn warn(path: &Path, reason: &str) {
-    eprintln!("whoops: couldn't save {}: {reason}", path.display());
 }

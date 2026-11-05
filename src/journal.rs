@@ -30,6 +30,8 @@ pub enum Line {
     Change { cmd: u64, change: Change },
     /// A command was undone.
     Undone { cmd: u64 },
+    /// Something went wrong that no single change can show. `whoops list` prints it.
+    Warning { text: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -98,6 +98,10 @@ pub struct Session {
     shell_pid: Option<u32>,
     shell_exe: Option<PathBuf>,
     housekeeping: Vec<Vec<u8>>,
+    /// Warnings already in the journal: a problem that keeps happening is noted once.
+    warned: HashSet<String>,
+    /// The journal couldn't be written, and the terminal has been told.
+    journal_failed: bool,
 }
 
 /// `$XDG_DATA_HOME/whoopz`, or `~/.local/share/whoopz`.
@@ -151,6 +155,8 @@ impl Session {
             shell_pid: None,
             shell_exe: None,
             housekeeping: Vec::new(),
+            warned: HashSet::new(),
+            journal_failed: false,
         })
     }
 
@@ -204,6 +210,13 @@ impl Session {
     /// The running command's text, if a hook said one is running.
     pub fn current_text(&self) -> Option<&str> {
         self.current
+            .and_then(|id| self.entries.get(&id))
+            .map(|e| e.text.as_str())
+    }
+
+    /// The text of the entry the call being handled belongs to.
+    pub fn target_text(&self) -> Option<&str> {
+        self.target
             .and_then(|id| self.entries.get(&id))
             .map(|e| e.text.as_str())
     }
@@ -335,6 +348,26 @@ impl Session {
     }
 
     // --- the journal ---
+
+    /// Keep a problem for `whoops list`. The watcher shares its terminal with whatever is
+    /// running, and printing would land in the middle of an editor's screen.
+    pub fn warn(&mut self, text: String) {
+        if self.warned.insert(text.clone()) {
+            let line = Line::Warning { text };
+            if let Err(e) = journal::append(&mut self.journal, &line) {
+                self.journal_failed(&e);
+            }
+        }
+    }
+
+    /// The one problem `whoops list` can't show, so it goes to the terminal, but only once: on
+    /// a full drive every change would fail.
+    pub fn journal_failed(&mut self, e: &io::Error) {
+        if !self.journal_failed {
+            self.journal_failed = true;
+            eprintln!("whoops: couldn't write the journal, so changes aren't being saved: {e}");
+        }
+    }
 
     /// Record a change made by the target entry.
     pub fn record(&mut self, change: Change) -> io::Result<()> {

@@ -150,7 +150,7 @@ Set `WHOOPZ_DEBUG=1` before `whoops shell` to see every call Whoopz pauses.
   can't be undone**. Calling them by full path (`/usr/bin/sudo`) gives an error, as do other
   programs that need root rights (`passwd`, `fusermount`). Use a terminal outside Whoopz for those.
 - Files over 512 MB on a different drive from `~/.local/share` (a hard link can't cross
-  drives, and a copy that big is skipped, with a warning)
+  drives, and a copy that big is skipped; `whoops list` shows which files)
 - Commands from an earlier `whoops shell` session: undo works within the session it happened in
 - A shell started inside the watched shell (`bash`, `zsh`): everything in it counts as one command
 - Edits written into the middle of a file without emptying it first (some editors, `dd conv=notrunc`)

@@ -7,6 +7,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Problems saving a file no longer print over whatever is on the screen. `whoops list` shows them
+  instead, under the command they belong to. If the journal itself can't be written, the terminal
+  is told once.
+
+### Fixed
+
+- `cargo test` in a terminal Whoopz is watching stops with one clear message, instead of failing
+  every test with a kernel error.
+
 ## [0.1.3] - 2026-11-05
 
 ### Added

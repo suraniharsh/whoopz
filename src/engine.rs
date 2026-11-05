@@ -7,6 +7,7 @@ use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
 use crate::session::{Marks, Session, lock};
+use crate::undo::shorten;
 use crate::watcher::{PausedCall, Reply, Watcher};
 use crate::{calls, handle};
 
@@ -140,10 +141,11 @@ fn decide(watcher: &dyn Watcher, call: &PausedCall, s: &mut Session) -> Option<R
         Err(e) => {
             // EFAULT: the program passed a bad pointer, and the kernel will tell it so.
             if e.raw_os_error() != Some(libc::EFAULT) && watcher.is_valid(call) {
-                eprintln!(
-                    "whoops: couldn't see what `{}` was about to change, so it isn't saved: {e}",
+                let during = shorten(s.target_text().unwrap_or("a command"), 40);
+                s.warn(format!(
+                    "couldn't see what `{}` changed during `{during}`, so it wasn't saved: {e}",
                     call.name
-                );
+                ));
             }
             return Some(Reply::Continue);
         }

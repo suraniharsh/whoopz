@@ -34,6 +34,9 @@ struct Command {
 /// How many lines of "restored …" to print before summarising.
 const SHOW: usize = 20;
 
+/// How many files `whoops list` names under a command before just counting them.
+const SHOW_NOT_SAVED: usize = 3;
+
 fn commands(s: &Session) -> io::Result<Vec<Command>> {
     let mut cmds: Vec<Command> = Vec::new();
     for line in journal::read(&s.journal_path())? {
@@ -60,9 +63,52 @@ fn commands(s: &Session) -> io::Result<Vec<Command>> {
                     c.undone = true;
                 }
             }
+            Line::Warning { .. } => {}
         }
     }
     Ok(cmds)
+}
+
+fn warnings(s: &Session) -> io::Result<Vec<String>> {
+    Ok(journal::read(&s.journal_path())?
+        .into_iter()
+        .filter_map(|line| match line {
+            Line::Warning { text } => Some(text),
+            _ => None,
+        })
+        .collect())
+}
+
+/// What a change lost for good, and why.
+fn not_saved(change: &Change) -> Option<(&Path, &str)> {
+    let (path, saved) = match change {
+        Change::Deleted { path, saved, .. }
+        | Change::Replaced { path, saved, .. }
+        | Change::Overwritten { path, saved } => (path, saved),
+        Change::Renamed {
+            to,
+            replaced: Some(saved),
+            ..
+        } => (to, saved),
+        _ => return None,
+    };
+    match saved {
+        Saved::Nothing { reason } => Some((path, reason)),
+        _ => None,
+    }
+}
+
+/// The lines under a command in `whoops list`, for what undo won't be able to bring back.
+fn not_saved_lines(changes: &[Change]) -> String {
+    let lost: Vec<_> = changes.iter().filter_map(not_saved).collect();
+    let mut text = String::new();
+    for (path, reason) in lost.iter().take(SHOW_NOT_SAVED) {
+        text += &format!("      not saved: {}: {reason}\n", path.display());
+    }
+    if lost.len() > SHOW_NOT_SAVED {
+        text += &format!("      and {} more\n", lost.len() - SHOW_NOT_SAVED);
+    }
+    text
 }
 
 pub fn list(s: &Session) -> Response {
@@ -70,13 +116,14 @@ pub fn list(s: &Session) -> Response {
         Ok(cmds) => cmds,
         Err(e) => return failed(format!("couldn't read the journal: {e}")),
     };
-    if cmds.is_empty() {
-        return Response {
-            text: "Nothing to undo yet.\n".into(),
-            code: 0,
-        };
-    }
+    let warnings = match warnings(s) {
+        Ok(warnings) => warnings,
+        Err(e) => return failed(format!("couldn't read the journal: {e}")),
+    };
     let mut text = String::new();
+    if cmds.is_empty() {
+        text += "Nothing to undo yet.\n";
+    }
     for c in &cmds {
         let mark = if c.undone { "  (undone)" } else { "" };
         let label = if c.background {
@@ -90,6 +137,15 @@ pub fn list(s: &Session) -> Response {
             shorten(&label, 40),
             summary(&c.changes)
         );
+        if !c.undone {
+            text += &not_saved_lines(&c.changes);
+        }
+    }
+    if !warnings.is_empty() {
+        text += "\nWarnings:\n";
+        for warning in &warnings {
+            text += &format!("  {warning}\n");
+        }
     }
     Response { text, code: 0 }
 }
@@ -457,7 +513,7 @@ fn summary(changes: &[Change]) -> String {
     .join(", ")
 }
 
-fn shorten(text: &str, max: usize) -> String {
+pub fn shorten(text: &str, max: usize) -> String {
     let one_line = text.replace('\n', " ");
     if one_line.chars().count() <= max {
         one_line

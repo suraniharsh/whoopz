@@ -50,6 +50,15 @@ cargo test --locked
 
 CI runs the same three checks.
 
+`cargo test` can't run in a terminal Whoopz is watching: the tests start their own watched
+shells, and Linux allows one watcher per process. Use a plain terminal, or start the tests from
+outside it:
+
+```sh
+systemd-run --user --wait --pipe --collect --working-directory="$PWD" \
+  -E PATH="$PATH" -- cargo test --locked
+```
+
 ## Pull requests
 
 Open them against `main`. Commit messages follow

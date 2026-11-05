@@ -17,6 +17,17 @@ not vulnerabilities:
 - `sudo`, `su`, `doas` and `pkexec` run outside the watched shell, so what they change isn't
   saved. Any program in a watched shell can ask for them, and whatever they start isn't watched.
 
+## Secrets in saved files
+
+Whoopz treats every file the same, so it also saves files that hold secrets. If a command deletes
+or replaces a login token, a key or a password file, the old copy stays in the stash until it's
+removed, a week later at most. Nobody else can open that folder, but a backup of your home folder
+may include it, and anything running as you can read it.
+
+Undo puts back what was there, so undoing a command that changed a login file brings the old
+login back. To remove saved files sooner, delete a finished session's folder from
+`~/.local/share/whoopz/sessions/`.
+
 ## What Whoopz promises
 
 Whoopz never changes a file on a program's behalf. Every change goes ahead in the kernel, as
