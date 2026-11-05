@@ -33,7 +33,8 @@ Each shell needs a small hook so Whoopz knows where commands start and end.
 - ⬜ `whoops restore <file>`: bring back one file instead of a whole command
 - ⬜ `whoops log <file>`: a file's history across commands
 - ⬜ Redo: undo an undo
-- ⬜ `sudo` commands
+- ✅ `sudo`, `su`, `doas` and `pkexec` work in a watched shell
+- ⬜ Undo what `sudo` commands change (they run outside Whoopz for now)
 
 ## Storage
 

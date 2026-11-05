@@ -9,6 +9,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `sudo`, `su`, `doas` and `pkexec` now work in a watched shell, and so does anything that calls
+  them through `PATH` (`yay`). They run outside Whoopz, so what they change can't be undone; the
+  first use in a session says so.
 - `whoops status` shows how much disk the saved files take, and which sessions use the most.
 - A total size limit for saved files: 5 GB, or set `WHOOPZ_STASH_LIMIT` (`2G`, `500M`). The oldest
   go first. Anything saved in the last hour stays, so a big `rm -rf` can still be undone.

@@ -14,12 +14,19 @@ not vulnerabilities:
 - Programs in a sandbox or container (bubblewrap, flatpak, podman, `unshare -m`) see a
   different filesystem; their changes aren't saved.
 - 32-bit ARM programs on 64-bit ARM aren't watched.
+- `sudo`, `su`, `doas` and `pkexec` run outside the watched shell, so what they change isn't
+  saved. Any program in a watched shell can ask for them, and whatever they start isn't watched.
 
 ## What Whoopz promises
 
 Whoopz never changes a file on a program's behalf. Every change goes ahead in the kernel, as
 the program, with its own permissions, security rules and view of the filesystem. Whoopz only
 saves what is about to be lost, into a folder only you can open.
+
+Whoopz starts only those four programs on a watched shell's behalf, from the paths it found when
+the session began. It refuses requests from other users, from programs in a sandbox, and from
+other terminal sessions. They run with your own rights until they ask for a password, as they
+would without Whoopz.
 
 ## What to report
 

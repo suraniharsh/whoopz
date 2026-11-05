@@ -14,6 +14,7 @@
 //! hooks      tells the watcher where commands start and end (bash, zsh)
 //! control    how `whoops` inside the shell asks the watcher for an undo
 //! undo       puts things back                                      (whoops, whoops list)
+//! standin    lets `sudo` work in a watched shell
 //! ```
 
 mod calls;
@@ -26,6 +27,7 @@ mod journal;
 mod launcher;
 mod procfs;
 mod session;
+mod standin;
 mod storage;
 mod sys;
 mod undo;
@@ -74,6 +76,9 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+    if let Some(name) = standin::called_as() {
+        std::process::exit(standin::request(&name)?);
+    }
     let cli = Cli::parse();
     let code = match cli.command {
         Some(Command::Shell {

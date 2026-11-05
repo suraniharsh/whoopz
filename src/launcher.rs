@@ -38,7 +38,7 @@ use crate::control::SOCK_VAR;
 use crate::hooks::{self, MARK_FD};
 use crate::session::{self, Marks, Session};
 use crate::watcher::seccomp::SeccompWatcher;
-use crate::{engine, filter, procfs, storage};
+use crate::{engine, filter, procfs, standin, storage};
 
 /// Set inside a watched shell, so `whoops shell` can't be started inside itself.
 const ACTIVE_VAR: &str = "WHOOPZ_ACTIVE";
@@ -73,7 +73,7 @@ fn choose_shell(flag: Option<&str>) -> Result<PathBuf> {
 }
 
 /// A path as given, or a name looked up in `$PATH`.
-fn find_program(name: &str) -> Option<PathBuf> {
+pub fn find_program(name: &str) -> Option<PathBuf> {
     if name.contains('/') {
         return Some(PathBuf::from(name));
     }
@@ -107,6 +107,7 @@ pub fn run_shell(shell_flag: Option<&str>, args: &[String]) -> Result<i32> {
         .with_context(|| format!("couldn't create the socket {}", sock_path.display()))?;
 
     let mut cmd = Command::new(&shell_path);
+    let stand_ins = standin::install(&session.dir, &mut cmd);
     cmd.env("SHELL", &shell_path)
         .env(ACTIVE_VAR, "1")
         .env(SOCK_VAR, &sock_path)
@@ -180,7 +181,7 @@ pub fn run_shell(shell_flag: Option<&str>, args: &[String]) -> Result<i32> {
     }
     {
         let session = session.clone();
-        std::thread::spawn(move || crate::control::serve(control, session));
+        std::thread::spawn(move || crate::control::serve(control, session, stand_ins));
     }
     let limit = storage::limit();
     std::thread::spawn(move || storage::keep_trimmed(&data, limit));
@@ -251,7 +252,11 @@ fn wait_for(shell: Pid) -> i32 {
         match waitpid(Pid::from_raw(-1), None) {
             Ok(WaitStatus::Exited(pid, code)) if pid == shell => return code,
             Ok(WaitStatus::Signaled(pid, sig, _)) if pid == shell => return 128 + sig as i32,
-            Ok(_) => continue, // an orphan, or the shell being stopped/continued
+            Ok(WaitStatus::Exited(pid, code)) => standin::reaped(pid.as_raw() as u32, code),
+            Ok(WaitStatus::Signaled(pid, sig, _)) => {
+                standin::reaped(pid.as_raw() as u32, 128 + sig as i32);
+            }
+            Ok(_) => continue, // the shell being stopped/continued
             Err(nix::errno::Errno::EINTR) => continue,
             Err(_) => return 1, // no children left at all
         }
@@ -345,19 +350,22 @@ fn receive_listener(sock: &OwnedFd) -> Result<OwnedFd> {
     bail!("the shell exited before Whoopz could start watching it")
 }
 
+/// What the watcher ignores. Anything it starts has to set these back.
+pub const TERMINAL_SIGNALS: [Signal; 5] = [
+    Signal::SIGINT,
+    Signal::SIGQUIT,
+    Signal::SIGTSTP,
+    Signal::SIGTTOU,
+    Signal::SIGTTIN,
+];
+
 /// Keep Ctrl-C, Ctrl-\ and Ctrl-Z from stopping the watcher. They are meant for the shell.
 ///
 /// This runs only after the shell has started: ignored signals survive exec, so doing it any
 /// earlier would make Ctrl-C stop working for every program in the shell. SIGTTOU and SIGTTIN
 /// are ignored so the watcher can still print to the terminal while the shell owns it.
 fn ignore_terminal_signals() {
-    for sig in [
-        Signal::SIGINT,
-        Signal::SIGQUIT,
-        Signal::SIGTSTP,
-        Signal::SIGTTOU,
-        Signal::SIGTTIN,
-    ] {
+    for sig in TERMINAL_SIGNALS {
         // SAFETY: SigIgn installs no handler code, so there is nothing that could run unsafely.
         unsafe {
             let _ = signal(sig, SigHandler::SigIgn);

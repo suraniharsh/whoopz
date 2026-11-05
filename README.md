@@ -146,7 +146,9 @@ Set `WHOOPZ_DEBUG=1` before `whoops shell` to see every call Whoopz pauses.
 
 - Anything that leaves your machine: `git push`, email, API calls
 - Databases changing their own files
-- `sudo` commands: `sudo` gives an error inside a Whoopz shell
+- `sudo`, `su`, `doas` and `pkexec` work, but they run outside Whoopz, so **what they change
+  can't be undone**. Calling them by full path (`/usr/bin/sudo`) gives an error, as do other
+  programs that need root rights (`passwd`, `fusermount`). Use a terminal outside Whoopz for those.
 - Files over 512 MB on a different drive from `~/.local/share` (a hard link can't cross
   drives, and a copy that big is skipped, with a warning)
 - Commands from an earlier `whoops shell` session: undo works within the session it happened in

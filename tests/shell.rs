@@ -111,7 +111,8 @@ impl Sandbox {
         let mut cmd = Command::new(BIN);
         let bin_dir = Path::new(BIN).parent().unwrap();
         let path = format!(
-            "{}:{}",
+            "{}:{}:{}",
+            self.root.join("fake").display(),
             bin_dir.display(),
             std::env::var("PATH").unwrap_or_default()
         );
@@ -1119,4 +1120,192 @@ fn undo_keeps_the_current_file_when_the_saved_copy_was_dropped() {
     assert_eq!(s.read("replaced"), "new");
     let text = run.stdout();
     assert_eq!(text.matches("its saved copy is gone").count(), 3, "{text}");
+}
+
+/// Install a fake `sudo` that writes what it sees to `report` in the sandbox's root, and exits 7.
+/// `slow <seconds>` makes it wait instead, after writing its process id to `pid`.
+fn fake_sudo(s: &Sandbox) {
+    use std::os::unix::fs::PermissionsExt;
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = slow ]; then
+    echo $$ > {root}/pid
+    sleep "$2"
+    exit 0
+fi
+{{
+    echo "args=[$1][$2]"
+    echo "cwd=$(pwd)"
+    echo "path=$PATH"
+    echo "whoopz vars: $(env | grep -c WHOOPZ)"
+    read -r _ _ _ _ group _ _ foreground _ < /proc/$$/stat
+    echo "group=$group foreground=$foreground"
+    grep -E '^(NoNewPrivs|Seccomp|SigIgn):' /proc/self/status
+    ls -l /proc/$$/fd
+    echo "stdin=$(cat)"
+}} >> {root}/report
+exit 7
+"#,
+        root = s.root.display()
+    );
+    let dir = s.root.join("fake");
+    fs::create_dir(&dir).unwrap();
+    fs::write(dir.join("sudo"), script).unwrap();
+    fs::set_permissions(dir.join("sudo"), fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn sudo_report(s: &Sandbox) -> String {
+    fs::read_to_string(s.root.join("report")).unwrap_or_default()
+}
+
+/// The kernel won't let a process with "no new privileges" become root, and everything in a
+/// watched shell has it. So the real program must be started from outside the shell.
+#[test]
+fn sudo_runs_outside_the_watched_shell() {
+    let s = Sandbox::new();
+    fake_sudo(&s);
+    s.write("sub/file", "x");
+
+    let run = s
+        .run("cd sub; echo hello | sudo 'a b' c; echo code=${PIPESTATUS[1]}")
+        .ok();
+
+    let report = sudo_report(&s);
+    assert!(run.stdout().contains("code=7"), "{}", run.stdout());
+    assert!(report.contains("args=[a b][c]"), "{report}");
+    assert!(report.contains("/work/sub\n"), "{report}");
+    assert!(report.contains("stdin=hello"), "{report}");
+    assert!(report.contains("whoopz vars: 0"), "{report}");
+    assert!(
+        !report.contains("sessions/"),
+        "stand-ins left on PATH: {report}"
+    );
+    for line in ["NoNewPrivs:\t0", "Seccomp:\t0"] {
+        assert!(report.contains(line), "{line}\n{report}");
+    }
+    // Nothing of the watcher's leaks into the program, least of all the seccomp listener.
+    for leak in ["anon_inode", "socket:", "journal", "stash"] {
+        assert!(!report.contains(leak), "{leak}\n{report}");
+    }
+    // The watcher ignores these, and ignored signals survive exec.
+    let ignored = report
+        .lines()
+        .find_map(|line| line.strip_prefix("SigIgn:\t"))
+        .and_then(|mask| u64::from_str_radix(mask, 16).ok())
+        .unwrap();
+    for sig in [
+        libc::SIGINT,
+        libc::SIGQUIT,
+        libc::SIGTSTP,
+        libc::SIGTTIN,
+        libc::SIGTTOU,
+    ] {
+        assert_eq!(ignored & (1 << (sig - 1)), 0, "signal {sig}");
+    }
+}
+
+/// `sudo` needs the terminal, to ask for a password. A background process that tries gets
+/// stopped, so it has to be in the terminal's foreground group.
+fn sudo_gets_the_terminal(shell: &str) {
+    let s = Sandbox::new();
+    fake_sudo(&s);
+    let mut term = Terminal::start(&s, shell);
+    term.run("sudo first </dev/null", 2);
+    term.run("sudo second </dev/null", 3);
+    let out = term.finish();
+
+    let report = sudo_report(&s);
+    for line in report.lines().filter(|l| l.starts_with("group=")) {
+        let (group, foreground) = line.split_once(' ').unwrap();
+        assert_eq!(
+            group.strip_prefix("group="),
+            foreground.strip_prefix("foreground="),
+            "{report}"
+        );
+    }
+    assert_eq!(report.matches("group=").count(), 2, "{report}\n{out}");
+    assert_eq!(out.matches("runs outside Whoopz").count(), 1, "{out}");
+}
+
+#[test]
+fn bash_sudo_gets_the_terminal() {
+    sudo_gets_the_terminal("/bin/bash");
+}
+
+#[test]
+fn fish_sudo_gets_the_terminal() {
+    if let Some(fish) = installed("fish") {
+        sudo_gets_the_terminal(&fish);
+    }
+}
+
+#[test]
+fn ctrl_c_stops_sudo() {
+    let s = Sandbox::new();
+    fake_sudo(&s);
+    let mut term = Terminal::start(&s, "/bin/bash");
+    writeln!(term.input, "sudo slow 30").unwrap();
+
+    let pid_file = s.root.join("pid");
+    let start = Instant::now();
+    while fs::read_to_string(&pid_file).unwrap_or_default().is_empty() {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "sudo never started"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let pid = fs::read_to_string(&pid_file).unwrap();
+    term.input.write_all(b"\x03").unwrap();
+    term.run("true", 2);
+
+    let proc_dir = PathBuf::from(format!("/proc/{}", pid.trim()));
+    let start = Instant::now();
+    while proc_dir.exists() {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "sudo kept running"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    term.finish();
+}
+
+/// A long `sudo` must not block `whoops`, which uses the same socket.
+#[test]
+fn whoops_still_answers_while_sudo_runs() {
+    let s = Sandbox::new();
+    fake_sudo(&s);
+    let run = s
+        .run("sudo slow 3 & sleep 0.3; timeout 1 whoops list; echo code=$?; wait")
+        .ok();
+    assert!(run.stdout().contains("code=0"), "{}", run.stdout());
+}
+
+#[test]
+fn sudo_is_refused_on_another_terminal() {
+    let s = Sandbox::new();
+    fake_sudo(&s);
+    let run = s.run("setsid -w sudo a b; echo code=$?").ok();
+    assert!(run.stdout().contains("code=1"), "{}", run.stdout());
+    assert!(run.stderr().contains("wrong one"), "{}", run.stderr());
+    assert_eq!(sudo_report(&s), "");
+}
+
+/// The real program would run outside the sandbox, so asking from inside one must fail.
+#[test]
+fn sudo_is_refused_from_a_sandbox() {
+    let sandboxes = Command::new("unshare")
+        .args(["-rm", "true"])
+        .status()
+        .is_ok_and(|status| status.success());
+    if !sandboxes {
+        return;
+    }
+    let s = Sandbox::new();
+    fake_sudo(&s);
+    let run = s.run("unshare -rm sudo a b; echo code=$?").ok();
+    assert!(run.stdout().contains("code=1"), "{}", run.stdout());
+    assert!(run.stderr().contains("sandbox"), "{}", run.stderr());
+    assert_eq!(sudo_report(&s), "");
 }

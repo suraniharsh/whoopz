@@ -7,36 +7,76 @@
 //! The messenger sends two lines: the request (`list`, `undo` or `undo 3`), then its current
 //! folder, so paths can be shown relative to it. The watcher answers with the exit code on
 //! the first line, then the text to print.
+//!
+//! A `sudo` stand-in sends its terminal along as well: see [`crate::standin`].
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Cursor, IoSliceMut, Read, Write};
 use std::net::Shutdown;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
-use nix::sys::socket::{getsockopt, sockopt};
+use nix::sys::socket::{ControlMessageOwned, MsgFlags, getsockopt, recvmsg, sockopt};
 
 use crate::session::{Session, lock};
+use crate::standin::{self, StandIns};
 use crate::undo::{self, Response};
 
 /// Set inside a watched shell: where the watcher's socket is.
 pub const SOCK_VAR: &str = "WHOOPZ_SOCK";
 
 /// Watcher side: answer requests until the process exits.
-pub fn serve(listener: UnixListener, session: Arc<Mutex<Session>>) {
+pub fn serve(listener: UnixListener, session: Arc<Mutex<Session>>, stand_ins: StandIns) {
+    let stand_ins = Arc::new(stand_ins);
     for conn in listener.incoming().flatten() {
-        let _ = answer(conn, &session);
+        // Each on its own thread: a stand-in's request lasts as long as `sudo` runs.
+        let (session, stand_ins) = (session.clone(), stand_ins.clone());
+        std::thread::spawn(move || answer(conn, &session, &stand_ins));
     }
 }
 
-fn answer(conn: UnixStream, session: &Mutex<Session>) -> std::io::Result<()> {
+/// Read the first bytes of a request, and any fds that came with them. A plain read would lose
+/// the fds, so this comes first for every request.
+fn receive(conn: &UnixStream, buf: &mut [u8]) -> std::io::Result<(usize, Vec<OwnedFd>)> {
+    let mut iov = [IoSliceMut::new(buf)];
+    let mut space = nix::cmsg_space!([RawFd; 3]);
+    let msg = recvmsg::<()>(
+        conn.as_raw_fd(),
+        &mut iov,
+        Some(&mut space),
+        MsgFlags::MSG_CMSG_CLOEXEC,
+    )?;
+    let mut fds = Vec::new();
+    for cmsg in msg.cmsgs()? {
+        if let ControlMessageOwned::ScmRights(received) = cmsg {
+            // SAFETY: the kernel just created these fds for us, and nothing else owns them.
+            fds.extend(
+                received
+                    .iter()
+                    .map(|&fd| unsafe { OwnedFd::from_raw_fd(fd) }),
+            );
+        }
+    }
+    Ok((msg.bytes, fds))
+}
+
+fn answer(conn: UnixStream, session: &Mutex<Session>, stand_ins: &StandIns) -> std::io::Result<()> {
     // The socket sits in a folder only you can open. Check anyway that the caller is you.
     let peer = getsockopt(&conn, sockopt::PeerCredentials).map_err(std::io::Error::from)?;
     if peer.uid() != nix::unistd::getuid().as_raw() {
         return Ok(());
     }
 
-    let mut reader = BufReader::new(&conn);
+    let mut first = [0; 4096];
+    let (len, fds) = receive(&conn, &mut first)?;
+    let first = &first[..len];
+    if first.starts_with(standin::REQUEST) {
+        let reply = standin::run(&conn, first, fds, peer.pid(), stand_ins);
+        return (&conn).write_all(reply.as_bytes());
+    }
+
+    let mut reader = BufReader::new(Cursor::new(first).chain(&conn));
     let mut request = String::new();
     reader.read_line(&mut request)?;
     let mut cwd = String::new();
