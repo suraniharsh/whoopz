@@ -1180,7 +1180,14 @@ fn sudo_runs_outside_the_watched_shell() {
         !report.contains("sessions/"),
         "stand-ins left on PATH: {report}"
     );
-    for line in ["NoNewPrivs:\t0", "Seccomp:\t0"] {
+    // "Seccomp" as for any program here: a container has a filter of its own on everything.
+    let seccomp = fs::read_to_string("/proc/self/status")
+        .unwrap()
+        .lines()
+        .find(|line| line.starts_with("Seccomp:"))
+        .unwrap()
+        .to_string();
+    for line in ["NoNewPrivs:\t0", &seccomp] {
         assert!(report.contains(line), "{line}\n{report}");
     }
     // Nothing of the watcher's leaks into the program, least of all the seccomp listener.
