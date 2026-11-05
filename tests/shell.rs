@@ -920,3 +920,124 @@ fn shell_flag_picks_the_shell() {
             .ends_with("/bash")
     );
 }
+
+/// `bash -c 'server &'` exits straight away and leaves the job running. The process the entry
+/// would be named after is gone, so the name comes from the process that made the change.
+#[test]
+fn a_background_job_whose_first_process_ended_still_has_a_name() {
+    let s = Sandbox::new();
+    s.run(
+        r#"
+cmd 'start the job'
+setsid sh -c '(sleep 0.3; touch late) &'
+done_
+sleep 1
+"#,
+    )
+    .ok();
+
+    assert!(s.exists("late"));
+    let journals = s.journals();
+    let entry = journals
+        .lines()
+        .find(|line| line.contains(r#""kind":"command""#) && line.contains(r#""background":true"#))
+        .unwrap_or_else(|| panic!("no background entry:\n{journals}"));
+    assert!(entry.contains("touch late"), "{entry}");
+}
+
+/// The sockets in the runtime folder, by name.
+fn sockets(s: &Sandbox) -> Vec<String> {
+    let dir = s.root.join("whoopz");
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Start a session that stays open, and return it with the name of its socket.
+fn open_session(s: &Sandbox) -> (std::process::Child, String) {
+    let before = sockets(s);
+    let child = s
+        .command("/bin/bash")
+        .args(["shell", "--", "-c", "sleep 5"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let name = new_socket(s, &before);
+    (child, name)
+}
+
+/// Wait for a socket that isn't in `before`.
+fn new_socket(s: &Sandbox, before: &[String]) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(new) = sockets(s).into_iter().find(|name| !before.contains(name)) {
+            return new;
+        }
+        assert!(Instant::now() < deadline, "the session made no socket");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// A killed session can't remove its own socket, so the next one does. A session that's still
+/// running keeps its socket.
+#[test]
+fn a_killed_sessions_socket_is_cleaned_up() {
+    let s = Sandbox::new();
+    let (mut running, running_sock) = open_session(&s);
+    let (mut killed, killed_sock) = open_session(&s);
+    killed.kill().unwrap();
+    killed.wait().unwrap();
+    assert!(sockets(&s).contains(&killed_sock));
+
+    s.run("true").ok();
+
+    let left = sockets(&s);
+    assert!(!left.contains(&killed_sock), "{left:?}");
+    assert!(left.contains(&running_sock), "{left:?}");
+    running.kill().unwrap();
+    running.wait().unwrap();
+}
+
+/// Sockets, named pipes and devices hold no data, so they're neither saved nor warned about.
+fn special_files_are_ignored(s: &Sandbox) {
+    let made = Command::new("mkfifo")
+        .args([s.path("gone"), s.path("over")])
+        .status()
+        .unwrap();
+    assert!(made.success());
+    s.write("note", "hello");
+
+    let run = s
+        .run(
+            "cmd 'rm gone'; rm gone; done_
+             cmd 'mv note over'; mv note over; done_
+             whoops",
+        )
+        .ok();
+
+    assert!(!run.stderr().contains("couldn't save"), "{}", run.stderr());
+    assert!(!s.journals().contains("/gone"), "{}", s.journals());
+    assert_eq!(s.read("note"), "hello");
+    assert!(!s.exists("gone") && !s.exists("over"));
+}
+
+#[test]
+fn special_files_are_ignored_on_the_same_drive() {
+    special_files_are_ignored(&Sandbox::new());
+}
+
+#[test]
+fn special_files_are_ignored_across_drives() {
+    // As in `files_on_another_drive_are_copied`: the stash under target/, the files under /tmp.
+    let data =
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("special-{}", std::process::id()));
+    special_files_are_ignored(&Sandbox::with_data_in(Some(&data)));
+    let _ = fs::remove_dir_all(&data);
+}

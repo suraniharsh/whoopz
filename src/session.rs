@@ -160,15 +160,11 @@ impl Session {
     /// private to the user) when there is one. A socket with no file at all (an "abstract"
     /// socket) would avoid the limit, but anyone on the machine could connect to it.
     pub fn socket_path(&self) -> io::Result<PathBuf> {
-        let id = self.dir.file_name().unwrap_or_default();
-        match std::env::var_os("XDG_RUNTIME_DIR") {
-            Some(run) if !run.is_empty() => {
-                let dir = PathBuf::from(run).join("whoopz");
-                private_dir(&dir)?;
-                Ok(dir.join(id).with_extension("sock"))
-            }
-            _ => Ok(self.dir.join("sock")),
+        let path = socket_of(&self.dir);
+        if let Some(dir) = path.parent() {
+            private_dir(dir)?;
         }
+        Ok(path)
     }
 
     pub fn journal_path(&self) -> PathBuf {
@@ -232,7 +228,7 @@ impl Session {
         // A background job: its own group, not the one the terminal is waiting on.
         if proc_info.pgid != shell_info.pgid && proc_info.pgid != proc_info.tpgid {
             let key = BackgroundKey::Group(proc_info.pgid);
-            return Some(self.background_entry(key, proc_info.pgid as u32));
+            return Some(self.background_entry(key, proc_info.pgid as u32, pid));
         }
         // The shell's own group (prompt tools, fish functions, shells without job control) or
         // the foreground group (the command you're waiting on).
@@ -242,19 +238,24 @@ impl Session {
         }
         // Born before this command line started, so not part of it.
         let launched = procfs::child_of_shell(pid, shell);
-        Some(self.background_entry(BackgroundKey::Process(launched), launched))
+        Some(self.background_entry(BackgroundKey::Process(launched), launched, pid))
     }
 
     /// The entry for a background job, made the first time it changes something. `named_by`
-    /// is the process whose command line names the entry.
-    fn background_entry(&mut self, key: BackgroundKey, named_by: u32) -> u64 {
+    /// is the process whose command line names the entry. It may have ended already (as in
+    /// `bash -c 'server &'`), and then `caller`, the process making the change, names it.
+    fn background_entry(&mut self, key: BackgroundKey, named_by: u32, caller: u32) -> u64 {
         let started = procfs::info(named_by).ok().map(|i| i.start_time);
         if let Some(&(id, start)) = self.background.get(&key)
             && (started.is_none() || started == start)
         {
             return id;
         }
-        let id = self.new_entry(Entry::new(procfs::cmdline(named_by), true));
+        let mut text = procfs::cmdline(named_by);
+        if text.is_empty() {
+            text = procfs::cmdline(caller);
+        }
+        let id = self.new_entry(Entry::new(text, true));
         self.background.insert(key, (id, started));
         id
     }
@@ -402,7 +403,20 @@ fn is_thread_of(shell: u32, pid: u32) -> bool {
     pid == shell || Path::new(&format!("/proc/{shell}/task/{pid}")).exists()
 }
 
-/// Remove sessions that ended more than [`KEEP_FOR`] ago.
+/// The socket of the session stored in `session_dir`.
+fn socket_of(session_dir: &Path) -> PathBuf {
+    let id = session_dir.file_name().unwrap_or_default();
+    match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(run) if !run.is_empty() => PathBuf::from(run)
+            .join("whoopz")
+            .join(id)
+            .with_extension("sock"),
+        _ => session_dir.join("sock"),
+    }
+}
+
+/// Remove sessions that ended more than [`KEEP_FOR`] ago, and the sockets of all ended sessions
+/// (a session that's killed can't remove its own).
 pub fn clean_old(data: &Path) {
     let Ok(entries) = fs::read_dir(data.join("sessions")) else {
         return;
@@ -411,11 +425,15 @@ pub fn clean_old(data: &Path) {
         let dir = entry.path();
         // A session whose lock we can take has ended (or crashed).
         let ended = File::open(dir.join("lock")).is_ok_and(|lock| lock.try_lock().is_ok());
+        if !ended {
+            continue;
+        }
+        let _ = fs::remove_file(socket_of(&dir));
         let last_used = fs::metadata(dir.join("journal.jsonl"))
             .or_else(|_| fs::metadata(&dir))
             .and_then(|m| m.modified());
         let old = last_used.is_ok_and(|t| t.elapsed().is_ok_and(|age| age > KEEP_FOR));
-        if ended && old {
+        if old {
             let _ = fs::remove_dir_all(&dir);
         }
     }

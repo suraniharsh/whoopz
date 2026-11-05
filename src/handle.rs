@@ -336,7 +336,7 @@ fn shrink(s: &mut Session, path: &Path, file: &File, st: &sys::Stat, len: i64) {
     );
 }
 
-/// Keep whatever is at `at` before it disappears. `None` if nothing is there.
+/// Keep whatever is at `at` before it disappears. `None` if there's nothing to keep.
 fn save_existing(s: &mut Session, at: &Location) -> Option<Saved> {
     let st = sys::lstat_at(&at.dir, &at.name).ok()?;
 
@@ -354,6 +354,11 @@ fn save_existing(s: &mut Session, at: &Location) -> Option<Saved> {
         });
     }
 
+    // Sockets, named pipes and devices hold no data, and whatever made them makes them again.
+    if !sys::is_regular(&st) {
+        return None;
+    }
+
     // The trick that makes this cheap: a second name for the same data. No copying, so even
     // a huge file is saved instantly.
     let (name, cname) = s.new_stash_name();
@@ -363,9 +368,6 @@ fn save_existing(s: &mut Session, at: &Location) -> Option<Saved> {
     }
 
     // Hard links only work within one drive. Across drives, fall back to a copy.
-    if !sys::is_regular(&st) {
-        return Some(not_saved(&at.path, "it's a special file".into()));
-    }
     let copied = sys::open_read_nofollow(&at.dir, &at.name)
         .map_err(|e| format!("couldn't open it: {e}"))
         .and_then(|file| copy_to_stash(s, &file, &st));

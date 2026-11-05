@@ -7,6 +7,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A background job whose first process had already ended (`bash -c 'server &'`) showed up in
+  `whoops list` with no name. It's now named after the process that made the change.
+- Deleting a socket or named pipe printed "couldn't save" over whatever was on the screen.
+  These hold no data, so they're now ignored: Whoopz saves files, folders and symlinks.
+- A killed session left its socket behind in `$XDG_RUNTIME_DIR/whoopz/`. The next session now
+  removes it.
+
 ## [0.1.2] - 2026-11-04
 
 ### Added
